@@ -129,8 +129,21 @@ three platforms, including Flatpak and Snap.
 
 ## Restoring a backup
 
-Close Prism and unzip the archive over the instance folder, replacing files.
-Backups are ordinary zips — nothing proprietary, nothing to install.
+```
+python3 gtnh-prism-update.py --restore                    # newest backup, everything
+python3 gtnh-prism-update.py --restore --only journeymap,visualprospecting
+python3 gtnh-prism-update.py --restore backup.zip --dry-run
+```
+
+Restoring merges files back into the instance; it does not roll the pack back,
+so you can recover map data without undoing the update. Backups are ordinary
+zips, so unzipping one over the instance folder by hand works too.
+
+Note that missing waypoints or ore veins are not always lost data: JourneyMap
+and VisualProspecting store per server, in a folder named after the server
+entry. If that name changes they start an empty map, and the old data is still
+in `.minecraft/journeymap/data/mp/` and `.minecraft/visualprospecting/` under
+the previous name — renaming it back restores everything.
 
 
 ## License

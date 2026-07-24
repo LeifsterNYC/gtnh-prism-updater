@@ -840,6 +840,71 @@ def make_backup(instance: Path, backup_dir: Path, mode, version, dry_run, assume
     return dest
 
 
+def find_backups(instance: Path, backup_dir: Path):
+    """Backup zips for an instance, newest first."""
+    if not backup_dir.is_dir():
+        return []
+    stem = re.sub(r"[^\w.\-]+", "_", instance.name)
+    zips = [p for p in backup_dir.glob("*.zip") if p.name.startswith(stem + "_")]
+    return sorted(zips, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def run_restore(args):
+    """Put files from a backup zip back into an instance."""
+    inst = pick_instance(args.instance, args.yes)
+    backup_dir = (Path(args.backup_dir).expanduser() if args.backup_dir
+                  else inst.parent.parent / "GTNH-Backups")
+    if args.restore not in ("", "auto"):
+        archive = Path(args.restore).expanduser()
+    else:
+        found = find_backups(inst, backup_dir)
+        if not found:
+            die("no backups for %s in %s\n"
+                "       Pass the zip explicitly: --restore /path/to/backup.zip" % (inst.name, backup_dir))
+        if len(found) > 1 and not args.yes:
+            print("Backups for %s:" % inst.name)
+            for i, p in enumerate(found, 1):
+                print("  %2d) %-52s %s" % (i, p.name, human(p.stat().st_size)))
+            try:
+                archive = found[int(input("Which one? [1-%d] " % len(found)).strip()) - 1]
+            except (ValueError, IndexError, EOFError):
+                die("no valid backup selected")
+        else:
+            archive = found[0]
+    if not archive.is_file():
+        die("no such backup: %s" % archive)
+
+    wanted = [p.strip() for p in args.only.split(",") if p.strip()] if args.only else []
+    mc = mc_dir(inst)
+    with zipfile.ZipFile(long_path(archive)) as zf:
+        members = [m for m in zf.infolist() if not m.is_dir()]
+        if wanted:
+            members = [m for m in members
+                       if any(m.filename == w or m.filename.startswith(w.rstrip("/") + "/") or
+                              m.filename.startswith("%s/%s" % (mc.name, w.rstrip("/")))
+                              for w in wanted)]
+        if not members:
+            die("nothing matching %s in %s" % (args.only, archive.name))
+        total = sum(m.file_size for m in members)
+        tops = sorted({m.filename.split("/")[0] + ("/" + m.filename.split("/")[1]
+                                                   if m.filename.startswith(mc.name + "/") else "")
+                       for m in members})
+        log("restoring %d files (%s) from %s" % (len(members), human(total), archive.name))
+        for t in tops:
+            print("      + %s" % t)
+        log("into %s" % inst)
+        if args.dry_run:
+            log("dry run — nothing was written.")
+            return 0
+        if not confirm("Close Prism first. Overwrite these files in the instance?", args.yes):
+            log("aborted, nothing changed")
+            return 1
+        for m in members:
+            zf.extract(m, long_path(inst))
+    log("restored. Launch the instance and check your waypoints before playing.")
+    return 0
+
+
 # --------------------------------------------------------------------------
 # instance.cfg merge
 # --------------------------------------------------------------------------
@@ -1243,6 +1308,12 @@ def parse_args(argv):
   %(prog)s --file ~/Downloads/GT_New_Horizons_2.9.0-beta-2_Java_17-25.zip
 """)
     p.add_argument("--list", action="store_true", help="list available versions and exit")
+    p.add_argument("--restore", nargs="?", const="auto", metavar="ZIP",
+                   help="put files back from a backup zip (newest one for the instance "
+                        "by default); combine with --only to restore just part of it")
+    p.add_argument("--only", metavar="PATHS",
+                   help="with --restore: comma-separated paths to restore, "
+                        "e.g. journeymap,visualprospecting,saves")
     p.add_argument("--check", action="store_true",
                    help="ask the server which version it runs, compare it with your instance "
                         "and offer to update (this is what the launch hook uses)")
@@ -1302,6 +1373,8 @@ def main(argv=None):
             print("  %-22s %s  %s" % (v["version"], v["published"],
                                       "pre-release" if v["prerelease"] else "stable"))
         return 0
+    if args.restore is not None:
+        return run_restore(args)
     if args.install_hook or args.remove_hook:
         return manage_hook(args)
     if args.check:
@@ -1456,7 +1529,8 @@ def run_update(args):
     log("done: %s is now on %s" % (target.name, version))
     if backup:
         print("      backup:  %s" % backup)
-        print("               restore by closing Prism and unzipping it over the instance folder")
+        print("               put anything back with --restore, e.g.")
+        print("               --restore --only journeymap,visualprospecting,saves")
     print("      next:    open Prism, check the instance's Java version (Java 21+ for 17-25 packs),")
     print("               memory (4-6 GB) and launch once before deleting anything.")
     if args.mode == "new" and old is not None:

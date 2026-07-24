@@ -54,8 +54,28 @@ Close Prism before running the updater by hand. Your worlds are never deleted.
 If something goes wrong
 -----------------------
 Backups are zip files in the GTNH-Backups folder next to your Prism
-"instances" folder, named like GTNH_2.8.4_20260724-153143.zip. To go back:
-close Prism, then unzip one over the instance folder, replacing files.
+"instances" folder, named like GTNH_2.8.4_20260724-153143.zip.
+
+Close Prism, then put things back with:
+
+  python3 gtnh-prism-update.py --restore
+      everything from the newest backup
+
+  python3 gtnh-prism-update.py --restore --only journeymap,visualprospecting
+      just your map, waypoints and ore veins
+
+  python3 gtnh-prism-update.py --restore --dry-run
+      show what a backup holds without writing anything
+
+Add --only saves for worlds. You can also just unzip the backup over the
+instance folder by hand — it's an ordinary zip.
+
+Missing waypoints or ore veins are not always lost: JourneyMap and
+VisualProspecting file their data per server, under a folder named after the
+server entry. If that name changes, they start a fresh empty map and the old
+data is still sitting in .minecraft/journeymap/data/mp/ and
+.minecraft/visualprospecting/ under the previous name. Look there first;
+renaming the old folder to the new name brings everything back.
 
 Your worlds live in <instance>/.minecraft/saves — worth copying somewhere safe
 before a big update, on top of what this does.
