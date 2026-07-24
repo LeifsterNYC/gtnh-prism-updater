@@ -1032,6 +1032,124 @@ def migrate_in_place(instance: Path, zip_path: Path, version, keep_extra, dry_ru
 
 
 # --------------------------------------------------------------------------
+# Java runtime
+# --------------------------------------------------------------------------
+
+def pack_java_range(pack_name):
+    """Java majors a pack flavour needs, read from its file name."""
+    m = re.search(r"Java_(\d+)(?:-(\d+))?", str(pack_name))
+    if not m:
+        return None
+    low = int(m.group(1))
+    return low, int(m.group(2)) if m.group(2) else low
+
+
+def instance_java_flavour(instance: Path):
+    """'17' if an instance is set up for the Java 17+ pack, '8' if not."""
+    if instance is None:
+        return None
+    if list((instance / "libraries").glob("lwjgl3ify*forgePatches.jar")) or \
+            list((instance / "patches").glob("me.eigenraven.lwjgl3ify.*")):
+        return "17"
+    return "8" if (instance / "mmc-pack.json").is_file() else None
+
+
+def java_major(java_exe):
+    """Major version of a java binary, or None if it won't run."""
+    try:
+        result = subprocess.run([str(java_exe), "-version"], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r'version "(\d+)(?:\.(\d+))?', result.stdout.decode("utf-8", "replace"))
+    if not m:
+        return None
+    major = int(m.group(1))
+    return int(m.group(2) or 0) if major == 1 else major   # "1.8.0_392" -> 8
+
+
+def candidate_javas(instance: Path):
+    """Every java binary we can find, Prism's own runtimes first."""
+    exe = "java.exe" if IS_WIN else "java"
+    globs = []
+    for root in candidate_instance_dirs():          # <prism data>/instances
+        globs.append(root.parent / "java" / "*" / "bin" / exe)
+    if IS_WIN:
+        for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+            base = os.environ.get(var)
+            if base:
+                for vendor in ("Java", "Eclipse Adoptium", "Microsoft", "Zulu", "Amazon Corretto"):
+                    globs.append(Path(base) / vendor / "*" / "bin" / exe)
+    elif platform.system() == "Darwin":
+        globs.append(Path("/Library/Java/JavaVirtualMachines/*/Contents/Home/bin") / exe)
+        globs.append(Path.home() / "Library/Java/JavaVirtualMachines/*/Contents/Home/bin" / exe)
+        globs.append(Path("/opt/homebrew/opt/openjdk*/bin") / exe)
+    else:
+        globs.append(Path("/usr/lib/jvm/*/bin") / exe)
+        globs.append(Path.home() / ".sdkman/candidates/java/*/bin" / exe)
+
+    found, seen = [], set()
+    for pattern in globs:
+        for path in sorted(Path(pattern.anchor).glob(str(pattern.relative_to(pattern.anchor)))):
+            if path.is_file() and str(path) not in seen:
+                seen.add(str(path))
+                found.append(path)
+    on_path = shutil.which("java")
+    if on_path and on_path not in seen:
+        found.append(Path(on_path))
+    return found
+
+
+def ensure_java(instance: Path, pack_name, dry_run, assume_yes):
+    """Make sure the instance points at a Java the new pack can actually run."""
+    wanted = pack_java_range(pack_name)
+    if not wanted:
+        return
+    low, high = wanted
+    cfg_path = instance / "instance.cfg"
+    cfg = read_cfg(cfg_path)
+    current = cfg.get("JavaPath", "").strip('"')
+
+    if current:
+        have = java_major(current)
+        if have is None:
+            warn("the Java set for this instance does not run: %s" % current)
+        elif low <= have <= high:
+            log("java:       %s is Java %s — right for this pack (needs %s)"
+                % (current, have, "%d-%d" % (low, high) if low != high else low))
+            return
+        else:
+            warn("this instance is set to Java %s but the pack needs Java %s"
+                 % (have, "%d-%d" % (low, high) if low != high else low))
+    else:
+        log("java:       no per-instance Java set; Prism's default must be Java %s"
+            % ("%d-%d" % (low, high) if low != high else low))
+
+    fits = []
+    for java in candidate_javas(instance):
+        major = java_major(java)
+        if major is not None and low <= major <= high:
+            fits.append((major, java))
+    if not fits:
+        warn("no Java %s found on this computer — in Prism open Settings > Java and let it "
+             "download one, or Edit Instance > Settings > Java" %
+             ("%d-%d" % (low, high) if low != high else low))
+        return
+    best = sorted(fits)[-1]
+    if not current and not cfg.get("OverrideJavaLocation"):
+        log("java:       Java %s available at %s if Prism's default is wrong" % best)
+        return
+    if not dry_run and confirm("Point this instance at Java %s (%s)?" % best, assume_yes):
+        cfg["OverrideJavaLocation"] = "true"
+        cfg["JavaPath"] = str(best[1])
+        for stale in ("JavaVersion", "JavaTimestamp", "JavaSignature",
+                      "JavaArchitecture", "JavaRealArchitecture"):
+            cfg.pop(stale, None)
+        write_cfg(cfg_path, cfg)
+        log("java:       switched the instance to Java %s (%s)" % best)
+
+
+# --------------------------------------------------------------------------
 # launch-time check + Prism pre-launch hook
 # --------------------------------------------------------------------------
 
@@ -1142,8 +1260,9 @@ def parse_args(argv):
     p.add_argument("--version", help="version to install (default: whatever the server runs)")
     p.add_argument("--url", help="explicit pack URL (skips version lookup)")
     p.add_argument("--file", help="use an already-downloaded pack zip")
-    p.add_argument("--java", choices=["17", "8"], default="17",
-                   help="pack flavour to prefer (default: 17, i.e. Java 17-25)")
+    p.add_argument("--java", choices=["17", "8"], default=None,
+                   help="pack flavour: 17 for the Java 17-25 packs, 8 for the Java 8 ones "
+                        "(default: whichever your instance already uses, else 17)")
     p.add_argument("--instance", help="path to the existing GTNH instance (default: auto-detect)")
     p.add_argument("--instances-dir", help="Prism instances folder to install into "
                                            "when you have no GTNH instance yet")
@@ -1195,6 +1314,29 @@ def main(argv=None):
 
 
 def run_update(args):
+    # ---- work out where it's going --------------------------------------
+    old = pick_instance(args.instance, args.yes, allow_none=True)
+    if old is None:
+        instances_root = (Path(args.instances_dir).expanduser() if args.instances_dir
+                          else default_instances_root())
+        log("no GTNH instance yet — installing a fresh one into %s" % instances_root)
+        args.mode = "new"
+        args.backup_mode = "none"
+        old_version = "none"
+    else:
+        old_version = instance_version(old)
+        instances_root = old.parent
+    if args.mode == "in-place" and old is None:
+        args.mode = "new"
+
+    # Stay on the flavour the instance already uses, so a Java 8 setup is not
+    # silently handed a pack that needs Java 17+.
+    if not args.java:
+        args.java = instance_java_flavour(old) or "17"
+        if old is not None:
+            log("java:       your instance uses the Java %s flavour of the pack"
+                % ("17-25" if args.java == "17" else "8"))
+
     # ---- work out what we're installing ---------------------------------
     if args.file:
         pack = Path(args.file).expanduser().resolve()
@@ -1234,20 +1376,6 @@ def run_update(args):
             version, url, size = resolve_latest(args.java, versions)
         pack = None
 
-    # ---- work out where it's going --------------------------------------
-    old = pick_instance(args.instance, args.yes, allow_none=True)
-    if old is None:
-        instances_root = (Path(args.instances_dir).expanduser() if args.instances_dir
-                          else default_instances_root())
-        log("no GTNH instance yet — installing a fresh one into %s" % instances_root)
-        args.mode = "new"
-        args.backup_mode = "none"
-        old_version = "none"
-    else:
-        old_version = instance_version(old)
-        instances_root = old.parent
-    if args.mode == "in-place" and old is None:
-        args.mode = "new"
     backup_dir = (Path(args.backup_dir).expanduser() if args.backup_dir
                   else instances_root.parent / "GTNH-Backups")
     cache_dir = (Path(args.cache_dir).expanduser() if args.cache_dir
@@ -1306,6 +1434,13 @@ def run_update(args):
                                       args.dry_run, args.force)
     else:
         target = migrate_in_place(old, pack, version, args.keep_extra_mods, args.dry_run)
+
+    pack_name = Path(url or pack or "").name
+    if not args.dry_run:
+        ensure_java(target, pack_name, args.dry_run, args.yes)
+    elif pack_java_range(pack_name):
+        low, high = pack_java_range(pack_name)
+        log("java:       this pack needs Java %s" % ("%d-%d" % (low, high) if low != high else low))
 
     if not args.keep_download and url and not args.dry_run:
         try:

@@ -25,6 +25,8 @@ Mac      : double-click  gtnh-updater.command
 Linux    : run          ./gtnh-updater.command
 
 It will:
+  * check that your Java works with the version it installs, and switch the
+    instance to a Java that does if it finds one
   * ask the server which GTNH version it is running
   * install that version if you have no GTNH instance yet
   * update your existing instance to it if they differ

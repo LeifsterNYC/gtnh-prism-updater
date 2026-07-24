@@ -66,6 +66,20 @@ Point it at your own server with `--server host:port`, the `GTNH_SERVER`
 environment variable, or by editing `SERVER_ADDRESS` at the top of the script.
 
 
+## Java
+
+The pack flavour follows the instance rather than a guess: an instance carrying
+`lwjgl3ify-*-forgePatches.jar` is a Java 17+ setup and gets the `Java_17-25`
+pack, anything else gets `Java_8`. Force it with `--java 17` / `--java 8`.
+
+After migrating, the Java the instance actually points at is **run** (`java
+-version`) and compared against the range in the pack's file name. If it doesn't
+fit, the script searches Prism's downloaded runtimes and the usual system
+locations for one that does and offers to switch the instance to it; if nothing
+suitable exists it says so and points at Prism's Java settings. A carried-over
+`JavaPath` from a Java 8 instance therefore can't silently break a 17-25 pack.
+
+
 ## Settings safety
 
 - `JvmArgs` is **not** carried into a new instance — Java arguments are
