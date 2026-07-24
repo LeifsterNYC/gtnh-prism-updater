@@ -31,6 +31,7 @@ import shutil
 import socket
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -321,11 +322,33 @@ def long_path(p: Path):
 # version discovery
 # --------------------------------------------------------------------------
 
+def curl(args, timeout=180, fail=True):
+    """Run curl, or return None if it isn't usable.
+
+    Python installed from python.org on macOS has no CA certificates until you
+    run its "Install Certificates.command", so every HTTPS request fails
+    verification. curl ships with the system and its own trust store, so it is
+    the fallback whenever urllib cannot make a connection.
+    """
+    try:
+        return subprocess.run(["curl", "-sS", "-L", "--connect-timeout", "20", "-A", UA]
+                              + (["--fail"] if fail else []) + args,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def http_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA,
                                                "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except Exception:
+        result = curl(["-H", "Accept: application/vnd.github+json", url], timeout=90)
+        if result is None or result.returncode != 0:
+            raise
+        return json.loads(result.stdout.decode("utf-8", "replace"))
 
 
 def list_versions(limit_pages=3):
@@ -370,31 +393,78 @@ def pack_url_candidates(version, java_pref):
             for sub in subs for v in variants]
 
 
-def remote_size(url):
-    """Return the file size, or None if the URL is not downloadable."""
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-0"})
-    try:
-        with urllib.request.urlopen(req, timeout=45) as r:
-            cr = r.headers.get("Content-Range")
-            if cr and "/" in cr:
-                return int(cr.rsplit("/", 1)[1])
-            cl = r.headers.get("Content-Length")
-            return int(cl) if cl else -1
-    except urllib.error.HTTPError as e:
-        if e.code in (403, 404):
-            return None
-        raise
-    except (urllib.error.URLError, TimeoutError):
-        return None
+def remote_size(url, attempts=2):
+    """Return (size, "") if the URL is downloadable, else (None, why).
+
+    Retries once, and falls back to a plain request in case something between
+    here and the CDN dislikes Range headers — a network problem must not be
+    reported as "that version does not exist".
+    """
+    detail = "unknown error"
+    for attempt in range(attempts):
+        for headers in ({"User-Agent": UA, "Range": "bytes=0-0"}, {"User-Agent": UA}):
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=45) as r:
+                    content_range = r.headers.get("Content-Range")
+                    if content_range and "/" in content_range:
+                        return int(content_range.rsplit("/", 1)[1]), ""
+                    length = r.headers.get("Content-Length")
+                    return (int(length) if length else -1), ""
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return None, "404 (no such file on the download server)"
+                detail = "HTTP %s" % e.code
+            except Exception as e:                      # TLS, DNS, proxy, timeout
+                detail = "%s: %s" % (type(e).__name__, e)
+        if attempt + 1 < attempts:
+            time.sleep(2)
+
+    result = curl(["-r", "0-0", "-D", "-", "-o", os.devnull, "-w", "\n%{http_code}", url],
+                  timeout=90, fail=False)
+    if result is None or result.returncode != 0:
+        if result is not None and result.stderr:
+            detail = "%s (curl: %s)" % (detail, result.stderr.decode("utf-8", "replace").strip()[:120])
+        return None, detail
+    body = result.stdout.decode("utf-8", "replace")
+    code = body.rsplit("\n", 1)[-1].strip()
+    if code == "404":
+        return None, "404 (no such file on the download server)"
+    if code not in ("200", "206"):
+        return None, "HTTP %s" % code
+    ranges = re.findall(r"content-range:\s*bytes\s*\d+-\d+/(\d+)", body, re.I)
+    if ranges:
+        return int(ranges[-1]), ""
+    lengths = re.findall(r"content-length:\s*(\d+)", body, re.I)
+    return (int(lengths[-1]) if lengths else -1), ""
 
 
 def resolve_pack(version, java_pref):
     """Return (url, size) for a version, or None if no pack was published."""
+    problems = []
     for url in pack_url_candidates(version, java_pref):
-        size = remote_size(url)
+        size, why = remote_size(url)
         if size is not None:
             return url, size
+        problems.append((url, why))
+    resolve_pack.problems = problems
     return None
+
+
+def explain_resolve_failure(version, problems):
+    """Say whether the version is missing or the download server is unreachable."""
+    reachable = [p for p in problems if not p[1].startswith("404")]
+    if reachable:
+        return ("could not reach the GTNH download server.\n"
+                "       %s\n"
+                "       Check your internet connection, VPN or proxy, then try again.\n"
+                "       You can also download the pack in a browser and pass it with --file:\n"
+                "         %s"
+                % (reachable[0][1], problems[0][0]))
+    return ("GTNH %s has no client pack on the download server.\n"
+            "       Run --list to see the versions that do, or pass --url/--file yourself.\n"
+            "       Tried:\n         %s"
+            % (version, "\n         ".join(url for url, _ in problems)))
 
 
 def resolve_latest(java_pref, versions, limit=10):
@@ -406,6 +476,9 @@ def resolve_latest(java_pref, versions, limit=10):
                 (cand["version"], cand["published"],
                  "pre-release" if cand["prerelease"] else "stable"))
             return cand["version"], found[0], found[1]
+        problems = getattr(resolve_pack, "problems", [])
+        if any(not why.startswith("404") for _, why in problems):
+            die(explain_resolve_failure(cand["version"], problems))
         log("%s has no client pack published — looking further back" % cand["version"])
     die("none of the %d newest releases has a downloadable client pack" % min(limit, len(versions)))
 
@@ -413,6 +486,19 @@ def resolve_latest(java_pref, versions, limit=10):
 # --------------------------------------------------------------------------
 # download
 # --------------------------------------------------------------------------
+
+def download_with_curl(url, part: Path, expected_size):
+    """Last-resort download for machines where Python's TLS is unusable."""
+    try:
+        result = subprocess.run(["curl", "-fL", "--retry", "3", "-C", "-", "-A", UA,
+                                 "--progress-bar", "-o", str(part), url])
+    except (OSError, subprocess.SubprocessError) as e:
+        warn("curl could not run either (%s)" % e)
+        return False
+    if result.returncode != 0:
+        return False
+    return not (expected_size > 0 and part.stat().st_size != expected_size)
+
 
 def download(url, dest: Path, expected_size, attempts=4):
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -456,7 +542,10 @@ def download(url, dest: Path, expected_size, attempts=4):
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
             print("", flush=True)
             if attempt == attempts:
-                die("download failed after %d attempts: %s" % (attempts, e))
+                warn("download failed in Python (%s) — retrying with curl" % e)
+                if not download_with_curl(url, part, expected_size):
+                    die("download failed after %d attempts: %s" % (attempts, e))
+                break
             warn("download interrupted (%s) — retrying (%d/%d)" % (e, attempt + 1, attempts))
             time.sleep(3 * attempt)
 
@@ -1118,9 +1207,9 @@ def run_update(args):
         url = args.url
         m = re.search(r"GT_New_Horizons_(.+?)_(?:Java|Client)", url)
         version = args.version or (m.group(1) if m else "custom")
-        size = remote_size(url)
+        size, why = remote_size(url)
         if size is None:
-            die("cannot download %s" % url)
+            die("cannot download %s\n       %s" % (url, why))
         pack = None
     else:
         version = args.version
@@ -1136,8 +1225,7 @@ def run_update(args):
         if version:
             found = resolve_pack(version, args.java)
             if not found:
-                die("no client pack found for version %r.\n       Tried:\n         %s"
-                    % (version, "\n         ".join(pack_url_candidates(version, args.java))))
+                die(explain_resolve_failure(version, resolve_pack.problems))
             url, size = found
         else:
             versions = list_versions()

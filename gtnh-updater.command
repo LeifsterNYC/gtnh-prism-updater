@@ -23,7 +23,15 @@ install_python_macos() {
     if curl -fL --progress-bar -o "$pkg" \
         "https://www.python.org/ftp/python/$PYVER/python-$PYVER-macos11.pkg"; then
         echo "  Installing Python — macOS will ask for your Mac password."
-        sudo installer -pkg "$pkg" -target / && rm -f "$pkg" && return 0
+        if sudo installer -pkg "$pkg" -target /; then
+            rm -f "$pkg"
+            # python.org builds ship without CA certificates; this installs them,
+            # otherwise every HTTPS download fails to verify.
+            for certs in /Applications/Python\ 3.*/Install\ Certificates.command; do
+                [ -f "$certs" ] && /bin/bash "$certs" >/dev/null 2>&1
+            done
+            return 0
+        fi
     fi
     rm -f "$pkg"
     echo "  Trying Apple's developer tools instead — click Install in the window that opens,"
