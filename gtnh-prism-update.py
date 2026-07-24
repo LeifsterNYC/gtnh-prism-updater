@@ -246,6 +246,10 @@ def probe_server(address, timeout=8):
         status = json.loads(buf.decode("utf-8", "replace"))
     except (OSError, ValueError, ConnectionError) as e:
         return {"error": "%s: %s" % (type(e).__name__, e)}
+    if not isinstance(status, dict):
+        # A booting or restarting server answers with a bare string, e.g.
+        # "Server is still starting! Please wait before reconnecting."
+        return {"error": "server said: %s" % str(status)[:120]}
     motd = _flatten_description(status.get("description"))
     m = re.search(r"\d+\.\d+(?:\.\d+)?(?:[-_](?:beta|rc|alpha|pre)[-_]?\d*)?", motd, re.I)
     return {"motd": motd.strip(),

@@ -82,10 +82,13 @@ environment variable, or by editing `SERVER_ADDRESS` at the top of the script.
 
 ## Requirements
 
-- Python 3.8+ (`python3-tk` on Linux if you want the dialog rather than a
-  terminal prompt)
+- Python 3.8+ — the double-click launchers install it for you if it's missing
+  (winget or the official installer on Windows, the python.org package on macOS,
+  your package manager on Linux), always after asking first
 - Prism Launcher or MultiMC
 - Java 21+ for the Java 17-25 packs, Java 8 for `--java 8`
+- Linux: `python3-tk` for the pop-up dialog; without it the check falls back to
+  a terminal prompt
 
 
 ## Options

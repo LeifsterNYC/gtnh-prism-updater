@@ -9,9 +9,12 @@ What you need once
 ------------------
 1. Prism Launcher            https://prismlauncher.org/download/
 2. Java 21 (or newer)        Prism will offer to download it for you
-3. Python 3                  https://www.python.org/downloads/
-                             Windows: TICK "Add python.exe to PATH" while installing
-4. Our server in your ZeroTier network (so 10.242.74.230 is reachable)
+3. Our server in your ZeroTier network (so 10.242.74.230 is reachable)
+
+Python 3 is also required, but you don't have to go get it — if it's missing,
+the updater offers to install it for you and does the whole thing itself.
+(Windows: silent, no clicking. Mac/Linux: it asks for your password once,
+the way any installer does.) Say no and it just prints the download link.
 
 
 How to use it
