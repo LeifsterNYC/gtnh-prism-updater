@@ -52,6 +52,7 @@ SQUAD_SERVER = "10.242.74.230:25565"     # ZeroTier address of hermes
 MOD_FIXES = [
     {
         "mod": "angelica",
+        "packs": "2.9",              # only packs this jar is built against
         "fixed_in": "2.1.51",
         "jar": "angelica-2.1.51.jar",
         "url": "https://github.com/GTNewHorizons/Angelica/releases/download/2.1.51/angelica-2.1.51.jar",
@@ -123,7 +124,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -369,7 +370,12 @@ def apply_mod_fixes(instance: Path, squad, dry_run=False):
     mods = mc / "mods" if mc else None
     if not mods or not mods.is_dir():
         return
+    pack = instance_version(instance)
     for fix in MOD_FIXES:
+        if fix.get("packs") and not pack.startswith(fix["packs"]):
+            # A fix jar built for 2.9 dropped into a 2.8 pack is a crash, not
+            # a favour — declined updates keep the pack they have.
+            continue
         installed = {}
         for jar in mods.iterdir():
             if jar.is_file() and mod_key(jar.name) == fix["mod"]:
@@ -589,6 +595,21 @@ def http_json(url):
 
 def version_tuple(text):
     return tuple(int(n) for n in re.findall(r"\d+", text or "")[:3])
+
+
+def pack_version_key(text):
+    """Orderable key for GTNH pack versions.
+
+    Understands that 2.9.0-beta-2 > 2.9.0-beta-1 and that a final 2.9.0
+    outranks its own betas and RCs — version_tuple() alone sees all of those
+    as (2, 9, 0).
+    """
+    text = text or ""
+    base = re.split(r"[-_](?:alpha|beta|pre|rc)", text, flags=re.I)[0]
+    nums = tuple(int(n) for n in re.findall(r"\d+", base)[:3])
+    m = re.search(r"[-_](alpha|beta|pre|rc)[-_]?(\d+)?", text, re.I)
+    phase = {"alpha": 0, "beta": 1, "pre": 2, "rc": 2}[m.group(1).lower()] if m else 3
+    return nums, phase, int(m.group(2)) if m and m.group(2) else 0
 
 
 def self_update(argv):
@@ -1701,6 +1722,11 @@ def run_check(args):
         log("server %s is on %s — your instance matches. Have fun!" % (args.server, server_ver))
         apply_mod_fixes(inst, squad)
         return 0
+    if pack_version_key(local) > pack_version_key(server_ver):
+        log("your instance (%s) is AHEAD of the server (%s) — the server needs updating, "
+            "not you. Launching." % (local, server_ver))
+        apply_mod_fixes(inst, squad)
+        return 0
 
     message = ("The server is running GTNH %s.\n"
                "Your instance '%s' is on %s.\n\n"
@@ -1970,6 +1996,20 @@ def run_update(args):
         log("%s is already on %s — nothing to do (use --force to reinstall)." % (old.name, version))
         apply_mod_fixes(old, squad, args.dry_run)   # fixes still get applied
         return 0
+    if (old is not None and old_version not in ("none", "unknown") and not args.dry_run
+            and pack_version_key(version) < pack_version_key(old_version)):
+        # Never silently downgrade — worlds saved on the newer pack may not
+        # load on the older one. -y does not waive this; only a human can.
+        if not ask_yes_no(
+                "GTNH downgrade?",
+                "This would DOWNGRADE %s from %s to %s.\n\n"
+                "Worlds saved on %s may not load on %s. A backup is taken first, "
+                "but going backwards is rarely what you want.\n\n"
+                "Downgrade anyway?" % (old.name, old_version, version, old_version, version),
+                assume_yes=False, timeout=300):
+            log("not downgrading. If the server is behind, it needs the update — not you.")
+            apply_mod_fixes(old, squad, args.dry_run)
+            return 0
 
     print()
     log("instance:   %s" % ("%s  (currently %s)" % (old, old_version) if old
