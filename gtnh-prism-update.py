@@ -118,6 +118,20 @@ JAVA8_ARGS = ("-XX:+UseG1GC -XX:+UnlockExperimentalVMOptions -XX:+DisableExplici
               "-XX:MaxGCPauseMillis=80 -Dsun.rmi.dgc.server.gcInterval=2147483646 "
               "-XX:G1NewSizePercent=20 -XX:G1ReservePercent=20")
 
+# Optional extras installed for squad members when absent. Unlike MOD_FIXES
+# these never replace anything — if a jar matching `match` exists (the user's
+# own copy, or the pack shipping it one day), the entry does nothing.
+MOD_EXTRAS = [
+    {
+        "match": "fpsreducer",
+        "packs": "2.9",
+        "jar": "FpsReducer-mc1.7.10-1.10.3.jar",
+        "url": "https://mediafilez.forgecdn.net/files/2627/303/FpsReducer-mc1.7.10-1.10.3.jar",
+        "why": "drops CPU/GPU load and mutes sound while AFK or tabbed out (client-side, "
+               "from the wiki's Additional Mods list)",
+    },
+]
+
 # instance.cfg keys carried from the old instance to the new one. Deliberately
 # excludes JvmArgs, which are Java-version specific and a common way to break
 # a fresh instance; use --keep-instance-cfg to copy the whole file instead.
@@ -136,7 +150,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -424,6 +438,70 @@ def apply_mod_fixes(instance: Path, squad, dry_run=False):
             if jar != target:
                 rmtree(jar)
         log("fix:        installed %s" % fix["jar"])
+
+    for extra in MOD_EXTRAS:
+        if extra.get("packs") and not pack.startswith(extra["packs"]):
+            continue
+        if any(extra["match"] in jar.name.lower() for jar in mods.iterdir() if jar.is_file()):
+            continue                                  # present, whoever put it there
+        log("extra:      %s — %s" % (extra["jar"], extra["why"]))
+        if dry_run:
+            continue
+        target = mods / extra["jar"]
+        try:
+            size, _ = remote_size(extra["url"])
+            download(extra["url"], target, size or -1, attempts=2)
+            with zipfile.ZipFile(long_path(target)) as jar_zip:
+                if not jar_zip.namelist():
+                    raise ValueError("empty jar")
+            log("extra:      installed %s" % extra["jar"])
+        except SystemExit:
+            warn("could not download %s — skipping, the game runs fine without it" % extra["jar"])
+            return
+        except Exception as e:
+            warn("could not install %s (%s) — skipping" % (extra["jar"], e))
+            if target.exists():
+                target.unlink()
+
+
+def squad_touchups(instance: Path, squad):
+    """Everything the launch check maintains besides the version itself."""
+    apply_mod_fixes(instance, squad)
+    apply_config_tweaks(instance, squad, remember=True)
+
+
+def apply_config_tweaks(instance: Path, squad, dry_run=False, remember=False):
+    """Squad config preferences, reapplied after updates reset the configs.
+
+    Currently: borderless fullscreen — the wiki's recommended replacement for
+    exclusive fullscreen on Java 17+ setups.
+    """
+    if not squad or instance is None:
+        return
+    mc = mc_dir(instance)
+    cfg_file = (mc / "config" / "lwjgl3ify.cfg") if mc else None
+    if not cfg_file or not cfg_file.is_file():
+        return                       # appears after first launch; caught next time
+    user_cfg = load_config()
+    if remember and "borderless" in user_cfg.get("tweaks", []):
+        return                       # applied once already; their setting is theirs now
+    try:
+        text = cfg_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    if not re.search(r"B:borderless=false", text):
+        return
+    log("tweak:      enabling borderless fullscreen (lwjgl3ify.cfg) — alt-tab freely")
+    if dry_run:
+        return
+    try:
+        cfg_file.write_text(text.replace("B:borderless=false", "B:borderless=true", 1),
+                            encoding="utf-8")
+        if remember:
+            user_cfg.setdefault("tweaks", []).append("borderless")
+            save_config(user_cfg)
+    except OSError as e:
+        warn("could not set borderless (%s)" % e)
 
 
 # --------------------------------------------------------------------------
@@ -1845,7 +1923,7 @@ def run_check(args):
     args.server, squad = resolve_server(args)
     if not args.server:
         log("no server configured — run with --server host:port to follow one. Launching.")
-        apply_mod_fixes(inst, squad)
+        squad_touchups(inst, squad)
         return 0
     local = instance_version(inst)
     status = probe_server(args.server)
@@ -1853,18 +1931,18 @@ def run_check(args):
     if status.get("error") or not status.get("version"):
         warn("could not read the server version from %s (%s) — launching anyway"
              % (args.server, status.get("error") or "no version in the MOTD"))
-        apply_mod_fixes(inst, squad)
+        squad_touchups(inst, squad)
         return 0
 
     server_ver = status["version"]
     if same_version(local, server_ver):
         log("server %s is on %s — your instance matches. Have fun!" % (args.server, server_ver))
-        apply_mod_fixes(inst, squad)
+        squad_touchups(inst, squad)
         return 0
     if pack_version_key(local) > pack_version_key(server_ver):
         log("your instance (%s) is AHEAD of the server (%s) — the server needs updating, "
             "not you. Launching." % (local, server_ver))
-        apply_mod_fixes(inst, squad)
+        squad_touchups(inst, squad)
         return 0
 
     message = ("The server is running GTNH %s.\n"
@@ -1874,7 +1952,7 @@ def run_check(args):
                % (server_ver, inst.name, local))
     if not ask_yes_no("GTNH update needed", message, args.yes):
         warn("not updating — you can play single-player, but joining the server will fail")
-        apply_mod_fixes(inst, squad)
+        squad_touchups(inst, squad)
         return 0
 
     args.check = False
@@ -2235,6 +2313,7 @@ def run_update(args):
     if not args.dry_run:
         apply_java(target, java_choice)
     apply_mod_fixes(target, squad, args.dry_run)
+    apply_config_tweaks(target, squad, args.dry_run)
     final_java = java_choice or read_cfg(target / "instance.cfg").get("JavaPath", "").strip('"')
     tune_performance(target, java_major(final_java) if final_java else None,
                      args.yes, args.dry_run)
