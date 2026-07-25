@@ -213,9 +213,21 @@ def _dialog(kind, title, message, timeout, default):
                                   max(0, (root.winfo_screenheight() - height) // 3)))
         root.lift()
         try:
+            root.focus_force()
             confirm_button.focus_force()
         except Exception:
             pass
+        if platform.system() == "Darwin":
+            # Prism spawns us without activating, so the window floats above
+            # everything while the keyboard still belongs to another app.
+            try:
+                subprocess.run(
+                    ["osascript", "-e",
+                     'tell application "System Events" to set frontmost of every process '
+                     'whose unix id is %d to true' % os.getpid()],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass                                     # buttons still work
         root.mainloop()                                  # returns once destroyed
         return answer["value"]
     except Exception:
@@ -239,7 +251,7 @@ def ask_yes_no(title, message, assume_yes=False, timeout=180):
 
 def show_message(title, message, timeout=60):
     print(message, flush=True)
-    _dialog("showinfo", title, message, timeout, True)
+    return _dialog("showinfo", title, message, timeout, True)
 
 
 # --------------------------------------------------------------------------
@@ -1598,8 +1610,11 @@ def main(argv=None):
         print("Available GTNH versions (nightlies excluded):")
         for v in versions[:25]:
             # Date-stamped tags are dev builds; the keyword list also has to
-            # survive upstream typos like "experiemental".
-            if re.search(r"(experi\w*mental|daily|dev|\d{4}-\d{2}-\d{2})", v["version"], re.I):
+            # survive upstream typos like "experiemental". A dated beta or RC
+            # is still a pre-release, so check that first.
+            if re.search(r"(beta|rc|pre)", v["version"], re.I):
+                label = "pre-release"
+            elif re.search(r"(experi\w*mental|daily|dev|\d{4}-\d{2}-\d{2})", v["version"], re.I):
                 label = "experimental"
             elif v["prerelease"]:
                 label = "pre-release"
