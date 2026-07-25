@@ -123,7 +123,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -1650,6 +1650,10 @@ def hook_command(instance: Path, server, script: Path):
 
 
 def manage_hook(args):
+    if not args.server:
+        args.server, _ = resolve_server(args)
+    if not args.server and not args.remove_hook:
+        die("no server to check against — run with --server host:port (or --squad) first")
     inst = pick_instance(args.instance, args.yes)
     cfg_path = inst / "instance.cfg"
     cfg = read_cfg(cfg_path)
