@@ -84,8 +84,29 @@ new pack files — press Play again to start. **No** launches the game anyway
 unreachable or its MOTD carries no version, it warns and launches normally: a
 network hiccup never blocks you from playing.
 
-Point it at your own server with `--server host:port`, the `GTNH_SERVER`
-environment variable, or by editing `SERVER_ADDRESS` at the top of the script.
+## Whose server?
+
+On first run it asks one question: are you part of Squishy Squadron (our
+group)? **Yes** points it at our server and enables our pinned mod fixes.
+**No** shows how to point it at any server: `--server host:port` once, which is
+remembered in a small config file (`%APPDATA%\gtnh-updater\config.json`,
+`~/Library/Application Support/gtnh-updater/config.json`, or
+`~/.config/gtnh-updater/config.json`). `GTNH_SERVER` overrides per-run;
+`--reconfigure` asks the question again. With no server configured it simply
+tracks the newest GTNH release.
+
+## Pinned mod fixes (squad only)
+
+`MOD_FIXES` at the top of the script lists mod jars we swap in ahead of the
+pack — currently Angelica 2.1.51 ([#1916]/[PR #1917]: with clouds disabled the
+personal dimension's farplane goes infinite, breaking subchunk culling so only
+the subchunk you occupy renders). A fix applies on every update and every
+launch check, is skipped in a heartbeat once installed (filename comparison, no
+network), and retires itself automatically when the pack ships an equal or
+newer version. Download failures leave the pack's own jar in place.
+
+[#1916]: https://github.com/GTNewHorizons/Angelica/issues/1916
+[PR #1917]: https://github.com/GTNewHorizons/Angelica/pull/1917
 
 
 ## Updating the updater

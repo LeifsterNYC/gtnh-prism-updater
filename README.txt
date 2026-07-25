@@ -27,9 +27,17 @@ Mac      : double-click  gtnh-updater.command
                xattr -dr com.apple.quarantine ~/Downloads/gtnh-updater
 Linux    : run          ./gtnh-updater.command
 
+The first time, it asks whether you are part of Squishy Squadron. Answer Yes —
+that points it at our server and turns on the mod fixes we run. (If you're
+someone else who found this tool: answer No and it shows you how to point it
+at your own server; --reconfigure asks again.)
+
 It will:
   * check that your Java works with the version it installs, and switch the
     instance to a Java that does if it finds one
+  * apply our pinned mod fixes (currently: Angelica 2.1.51, which fixes the
+    personal dimension rendering only the block you stand in when clouds are
+    off) — each fix retires itself once the pack ships that version
   * ask the server which GTNH version it is running
   * install that version if you have no GTNH instance yet
   * update your existing instance to it if they differ

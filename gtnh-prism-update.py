@@ -40,10 +40,26 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-# The server everyone plays on. Its MOTD carries the pack version, so a plain
-# server-list ping tells us which version a client needs. Override with
-# --server or the GTNH_SERVER environment variable.
-SERVER_ADDRESS = "10.242.74.230:25565"   # ZeroTier address of hermes
+# Our server. Its MOTD carries the pack version, so a plain server-list ping
+# tells us which version a client needs. Anyone else can point the updater at
+# their own with --server, the GTNH_SERVER variable, or the config file.
+SQUAD_NAME = "Squishy Squadron"
+SQUAD_SERVER = "10.242.74.230:25565"     # ZeroTier address of hermes
+
+# Mod fixes applied to squad members' instances until GTNH itself ships them.
+# Each entry stops applying as soon as the pack carries an equal or newer
+# version, so this list does not need pruning to stay correct.
+MOD_FIXES = [
+    {
+        "mod": "angelica",
+        "fixed_in": "2.1.51",
+        "jar": "angelica-2.1.51.jar",
+        "url": "https://github.com/GTNewHorizons/Angelica/releases/download/2.1.51/angelica-2.1.51.jar",
+        "why": "Angelica #1916 / PR #1917: with clouds disabled the personal dimension's "
+               "farplane goes infinite, which breaks subchunk culling — only the subchunk "
+               "you occupy renders, and it follows you around. GTNH 2.9.0-beta-2 ships 2.1.50.",
+    },
+]
 
 REPO_API = "https://api.github.com/repos/GTNewHorizons/GT-New-Horizons-Modpack/releases"
 DL_BASE = "https://downloads.gtnewhorizons.com/Multi_mc_downloads"
@@ -107,7 +123,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.3.3"
+__version__ = "1.4.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -253,6 +269,143 @@ def ask_yes_no(title, message, assume_yes=False, timeout=180):
 def show_message(title, message, timeout=60):
     print(message, flush=True)
     return _dialog("showinfo", title, message, timeout, True)
+
+
+# --------------------------------------------------------------------------
+# settings, asked once and remembered
+# --------------------------------------------------------------------------
+
+def config_path():
+    if IS_WIN:
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    elif platform.system() == "Darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "gtnh-updater" / "config.json"
+
+
+def load_config():
+    try:
+        return json.loads(config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(cfg):
+    try:
+        config_path().parent.mkdir(parents=True, exist_ok=True)
+        config_path().write_text(json.dumps(cfg, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+    except OSError as e:
+        warn("could not save your settings (%s)" % e)
+
+
+def resolve_server(args):
+    """Return (server, squad_member), asking once on the very first run.
+
+    Squad members get our address baked in; everybody else is pointed at the
+    config file so the tool is useful to them too.
+    """
+    cfg = load_config()
+    if args.squad is not None:                       # explicit flag, remember it
+        cfg["squad"] = bool(args.squad)
+        if args.squad and not args.server:
+            cfg["server"] = SQUAD_SERVER
+        save_config(cfg)
+    if args.server:                                  # explicit address wins
+        changed = cfg.get("server") != args.server
+        cfg["server"] = args.server
+        # Hooks installed before the question existed bake our address in;
+        # pointing at the squad server IS the answer.
+        if args.server == SQUAD_SERVER and "squad" not in cfg:
+            cfg["squad"] = True
+            changed = True
+        if changed:
+            save_config(cfg)
+        return args.server, bool(cfg.get("squad"))
+    from_env = os.environ.get("GTNH_SERVER")
+    if from_env:
+        return from_env, bool(cfg.get("squad")) or from_env == SQUAD_SERVER
+
+    if "squad" not in cfg or args.reconfigure:
+        joined = ask_yes_no(
+            "GTNH updater — first run",
+            "Are you part of %s?\n\n"
+            "Yes — you play on our server. The updater will keep your GTNH matched "
+            "to it, and apply the mod fixes we run.\n\n"
+            "No — you play somewhere else or single-player. You'll be shown how to "
+            "point this at your own server." % SQUAD_NAME,
+            assume_yes=False, timeout=300)
+        cfg["squad"] = bool(joined)
+        if joined:
+            cfg["server"] = SQUAD_SERVER
+        save_config(cfg)
+        if not joined:
+            show_message(
+                "GTNH updater — pointing it at your server",
+                "No problem. To follow your own server's version, run this once:\n\n"
+                "    gtnh-prism-update.py --server your.server.address:25565\n\n"
+                "It will be remembered in:\n%s\n\n"
+                "Without a server it simply updates to the newest GTNH release, "
+                "which you can also ask for directly with --latest."
+                % config_path(), timeout=120)
+    return cfg.get("server"), bool(cfg.get("squad"))
+
+
+# --------------------------------------------------------------------------
+# mod fixes
+# --------------------------------------------------------------------------
+
+def apply_mod_fixes(instance: Path, squad, dry_run=False):
+    """Swap in fixed mod jars the pack hasn't caught up with yet.
+
+    Costs nothing when there is nothing to do: the decision is made from the
+    jar file names, so no network call happens once a fix is in place.
+    """
+    if not squad or instance is None:
+        return
+    mc = mc_dir(instance)
+    mods = mc / "mods" if mc else None
+    if not mods or not mods.is_dir():
+        return
+    for fix in MOD_FIXES:
+        installed = {}
+        for jar in mods.iterdir():
+            if jar.is_file() and mod_key(jar.name) == fix["mod"]:
+                found = re.search(r"(\d+\.\d+(?:\.\d+)?)", jar.name)
+                installed[jar] = version_tuple(found.group(1)) if found else (0,)
+        if not installed:
+            continue
+        newest = max(installed.values())
+        wanted = version_tuple(fix["fixed_in"])
+        if newest >= wanted:
+            continue                                  # pack shipped it; superseded
+        have = ".".join(str(n) for n in newest) if newest != (0,) else "unknown"
+        log("fix:        %s %s -> %s" % (fix["mod"], have, fix["fixed_in"]))
+        print("      %s" % fix["why"])
+        if dry_run:
+            continue
+        target = mods / fix["jar"]
+        try:
+            size, _ = remote_size(fix["url"])
+            download(fix["url"], target, size or -1, attempts=2)
+            with zipfile.ZipFile(long_path(target)) as jar_zip:   # must be a real jar
+                if not jar_zip.namelist():
+                    raise ValueError("empty jar")
+        except SystemExit:
+            warn("could not download the %s fix — the pack's own version is still in "
+                 "place, so the game still runs" % fix["mod"])
+            return
+        except Exception as e:
+            warn("could not install the %s fix (%s) — leaving the pack's version" % (fix["mod"], e))
+            if target.exists() and target not in installed:
+                target.unlink()
+            continue
+        for jar in installed:
+            if jar != target:
+                rmtree(jar)
+        log("fix:        installed %s" % fix["jar"])
 
 
 # --------------------------------------------------------------------------
@@ -1525,17 +1678,24 @@ def run_check(args):
     if inst is None:
         warn("no GTNH instance found — skipping the version check")
         return 0
+    args.server, squad = resolve_server(args)
+    if not args.server:
+        log("no server configured — run with --server host:port to follow one. Launching.")
+        apply_mod_fixes(inst, squad)
+        return 0
     local = instance_version(inst)
     status = probe_server(args.server)
 
     if status.get("error") or not status.get("version"):
         warn("could not read the server version from %s (%s) — launching anyway"
              % (args.server, status.get("error") or "no version in the MOTD"))
+        apply_mod_fixes(inst, squad)
         return 0
 
     server_ver = status["version"]
     if same_version(local, server_ver):
         log("server %s is on %s — your instance matches. Have fun!" % (args.server, server_ver))
+        apply_mod_fixes(inst, squad)
         return 0
 
     message = ("The server is running GTNH %s.\n"
@@ -1545,6 +1705,7 @@ def run_check(args):
                % (server_ver, inst.name, local))
     if not ask_yes_no("GTNH update needed", message, args.yes):
         warn("not updating — you can play single-player, but joining the server will fail")
+        apply_mod_fixes(inst, squad)
         return 0
 
     args.check = False
@@ -1600,8 +1761,15 @@ def parse_args(argv):
     p.add_argument("--install-hook", action="store_true",
                    help="make Prism run that check every time you press Play")
     p.add_argument("--remove-hook", action="store_true", help="undo --install-hook")
-    p.add_argument("--server", default=os.environ.get("GTNH_SERVER", SERVER_ADDRESS),
-                   help="server to ask for the required version (default: %(default)s)")
+    p.add_argument("--server", default=None,
+                   help="server to ask for the required version; remembered for next time "
+                        "(default: whatever you chose on first run)")
+    p.add_argument("--squad", dest="squad", action="store_true", default=None,
+                   help="you play on the %s server — use its address" % SQUAD_NAME)
+    p.add_argument("--no-squad", dest="squad", action="store_false",
+                   help="you don't; skip our address and our mod fixes")
+    p.add_argument("--reconfigure", action="store_true",
+                   help="ask the first-run questions again")
     p.add_argument("--latest", action="store_true",
                    help="target the newest GTNH release instead of the version the server runs")
     p.add_argument("--version", help="version to install (default: whatever the server runs)")
@@ -1722,6 +1890,8 @@ def _run_and_hook(args):
 
 
 def run_update(args):
+    args.server, squad = resolve_server(args)
+
     # ---- work out where it's going --------------------------------------
     old = pick_instance(args.instance, args.yes, allow_none=True)
     if old is None:
@@ -1763,7 +1933,10 @@ def run_update(args):
         pack = None
     else:
         version = args.version
-        if not version and not args.latest:
+        if not version and not args.latest and not args.server:
+            log("no server configured — using the newest GTNH release. "
+                "Point at one with --server host:port.")
+        if not version and not args.latest and args.server:
             status = probe_server(args.server)
             if status.get("version"):
                 version = status["version"]
@@ -1791,6 +1964,7 @@ def run_update(args):
 
     if old is not None and old_version == version and not args.force:
         log("%s is already on %s — nothing to do (use --force to reinstall)." % (old.name, version))
+        apply_mod_fixes(old, squad, args.dry_run)   # fixes still get applied
         return 0
 
     print()
@@ -1868,6 +2042,7 @@ def run_update(args):
             % (target, target, "\n       Your backup: %s" % backup if backup else ""))
     if not args.dry_run:
         apply_java(target, java_choice)
+    apply_mod_fixes(target, squad, args.dry_run)
 
     if not args.keep_download and url and not args.dry_run:
         try:
