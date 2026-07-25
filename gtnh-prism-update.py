@@ -107,16 +107,38 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
+__version__ = "1.3.0"
+SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
 # --------------------------------------------------------------------------
 # output helpers
 # --------------------------------------------------------------------------
 
-def _color(code, text):
+def _ansi_supported():
+    """The old Windows console prints escape codes literally unless asked not to."""
     if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
-        return text
-    return "\033[%sm%s\033[0m" % (code, text)
+        return False
+    if not IS_WIN:
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        return bool(kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+    except Exception:
+        return False
+
+
+ANSI = _ansi_supported()
+
+
+def _color(code, text):
+    return text if not ANSI else "\033[%sm%s\033[0m" % (code, text)
 
 
 def log(msg):
@@ -349,6 +371,58 @@ def http_json(url):
         if result is None or result.returncode != 0:
             raise
         return json.loads(result.stdout.decode("utf-8", "replace"))
+
+
+def version_tuple(text):
+    return tuple(int(n) for n in re.findall(r"\d+", text or "")[:3])
+
+
+def self_update(argv):
+    """Replace this script with the newest release, then re-run it.
+
+    Runs before anything else so a fix never waits for someone to re-download
+    the zip by hand. Any failure is ignored: an updater that cannot update
+    itself must still update Minecraft.
+    """
+    if os.environ.get("GTNH_SELF_UPDATED"):
+        return
+    script = Path(__file__).resolve()
+    try:
+        latest = http_json(SELF_RELEASE_API)
+    except Exception:
+        return                                    # offline, rate-limited, whatever
+    tag = latest.get("tag_name") or ""
+    if not version_tuple(tag) or version_tuple(tag) <= version_tuple(__version__):
+        return
+    asset = next((a for a in latest.get("assets", []) if a["name"].endswith(".zip")), None)
+    if not asset:
+        return
+    log("updating the updater itself: %s -> %s" % (__version__, tag))
+    try:
+        staging = Path(tempfile.mkdtemp(prefix="gtnh-selfupdate-"))
+        archive = staging / "release.zip"
+        size, _ = remote_size(asset["browser_download_url"])
+        download(asset["browser_download_url"], archive, size or -1, attempts=2)
+        with zipfile.ZipFile(long_path(archive)) as zf:
+            names = zf.namelist()
+            if "gtnh-prism-update.py" not in names:
+                raise ValueError("release zip has no gtnh-prism-update.py")
+            zf.extractall(long_path(staging))
+        new_script = staging / "gtnh-prism-update.py"
+        compile(new_script.read_text(encoding="utf-8"), str(new_script), "exec")
+        for name in names:
+            source = staging / name
+            if not source.is_file():
+                continue
+            if name == "gtnh-prism-update.py" or (script.parent / name).exists():
+                shutil.copy2(str(source), str(script.parent / name))
+        rmtree(staging)
+    except Exception as e:
+        warn("could not update the updater (%s) — carrying on with %s" % (e, __version__))
+        return
+    env = dict(os.environ, GTNH_SELF_UPDATED="1")
+    result = subprocess.run([sys.executable, str(script)] + list(argv[1:]), env=env)
+    sys.exit(result.returncode)
 
 
 def list_versions(limit_pages=3):
@@ -1353,6 +1427,8 @@ def parse_args(argv):
     p.add_argument("--keep-extra-mods", action="store_true",
                    help="carry mods you added yourself into the updated instance "
                         "(they are only listed, not copied, by default)")
+    p.add_argument("--no-self-update", action="store_true",
+                   help="don't update this script from GitHub before running")
     p.add_argument("--keep-download", action="store_true", help="don't delete the pack zip afterwards")
     p.add_argument("--force", action="store_true", help="overwrite an existing target instance")
     p.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
@@ -1363,6 +1439,8 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv)
     args.mode = args.mode or ("in-place" if (args.check or args.setup) else "new")
+    if not args.no_self_update:
+        self_update(sys.argv)
 
     if args.list:
         versions = list_versions()
@@ -1382,6 +1460,10 @@ def main(argv=None):
     rc = run_update(args)
     if rc == 0 and args.setup and not args.dry_run:
         args.install_hook, args.remove_hook = True, False
+        # Use the instance we just wrote, never re-detect: with more than one
+        # GTNH instance around, re-detection would stop and ask.
+        if getattr(run_update, "target", None):
+            args.instance = str(run_update.target)
         rc = manage_hook(args)
     return rc
 
@@ -1471,6 +1553,7 @@ def run_update(args):
                             else "in-place update of the existing instance"))
     log("backup:     %s" % ("skipped (--backup-mode none)" if args.backup_mode == "none"
                             else "%s -> %s" % (args.backup_mode, backup_dir)))
+    log("updater:    %s" % __version__)
     print()
 
     if args.mode == "in-place" and args.backup_mode == "none" and not args.dry_run:
@@ -1507,6 +1590,15 @@ def run_update(args):
                                       args.dry_run, args.force)
     else:
         target = migrate_in_place(old, pack, version, args.keep_extra_mods, args.dry_run)
+        # "GT New Horizons 2.9.0-beta-1" holding beta-2 is just confusing. Only
+        # rename when the name carries the old version, never a custom name.
+        cfg = read_cfg(target / "instance.cfg")
+        display = cfg.get("name", target.name)
+        if old_version != "none" and old_version in display and not args.dry_run:
+            cfg["name"] = display.replace(old_version, version)
+            write_cfg(target / "instance.cfg", cfg)
+            log("renamed the instance to %r in Prism" % cfg["name"])
+    run_update.target = target
 
     pack_name = Path(url or pack or "").name
     if not args.dry_run:
