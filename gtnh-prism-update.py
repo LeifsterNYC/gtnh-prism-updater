@@ -107,7 +107,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -225,7 +225,8 @@ def _dialog(kind, title, message, timeout, default):
                     ["osascript", "-e",
                      'tell application "System Events" to set frontmost of every process '
                      'whose unix id is %d to true' % os.getpid()],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+                    **quiet_process_kwargs())
             except (OSError, subprocess.SubprocessError):
                 pass                                     # buttons still work
         root.mainloop()                                  # returns once destroyed
@@ -392,6 +393,17 @@ def long_path(p: Path):
 # version discovery
 # --------------------------------------------------------------------------
 
+def quiet_process_kwargs():
+    """Keep helper processes from flashing up console windows on Windows.
+
+    Prism launches the pre-launch check as a GUI child, so every java -version
+    or curl probe would otherwise open its own console window.
+    """
+    if IS_WIN:
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
 def curl(args, timeout=180, fail=True):
     """Run curl, or return None if it isn't usable.
 
@@ -403,7 +415,8 @@ def curl(args, timeout=180, fail=True):
     try:
         return subprocess.run(["curl", "-sS", "-L", "--connect-timeout", "20", "-A", UA]
                               + (["--fail"] if fail else []) + args,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+                              **quiet_process_kwargs())
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -1282,7 +1295,8 @@ def java_major(java_exe):
     """Major version of a java binary, or None if it won't run."""
     try:
         result = subprocess.run([str(java_exe), "-version"], stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, timeout=20)
+                                stderr=subprocess.STDOUT, timeout=20,
+                                **quiet_process_kwargs())
     except (OSError, subprocess.SubprocessError):
         return None
     m = re.search(r'version "(\d+)(?:\.(\d+))?', result.stdout.decode("utf-8", "replace"))
@@ -1608,6 +1622,35 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
+def single_instance_lock(tag, stale_after=4 * 3600):
+    """Refuse to run twice at once.
+
+    Prism can fire the pre-launch check again while one is still on screen,
+    and two updaters writing the same instance is the last thing anyone needs.
+    Returns the lock path to release, or None if another run holds it.
+    """
+    lock = Path(tempfile.gettempdir()) / ("gtnh-updater-%s.lock" % re.sub(r"\W+", "-", tag)[-60:])
+    try:
+        if lock.exists() and time.time() - lock.stat().st_mtime > stale_after:
+            lock.unlink()                      # left behind by a killed run
+        handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(handle, str(os.getpid()).encode())
+        os.close(handle)
+        return lock
+    except FileExistsError:
+        return None
+    except OSError:
+        return lock                            # locking is best-effort, never fatal
+
+
+def release_lock(lock):
+    if lock:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
 def main(argv=None):
     args = parse_args(argv)
     args.mode = args.mode or ("in-place" if (args.check or args.setup) else "new")
@@ -1637,8 +1680,20 @@ def main(argv=None):
         return run_restore(args)
     if args.install_hook or args.remove_hook:
         return manage_hook(args)
-    if args.check:
-        return run_check(args)
+
+    lock = single_instance_lock(args.instance or "auto")
+    if lock is None:
+        warn("another copy of the updater is already running — leaving this one to it")
+        return 0
+    try:
+        if args.check:
+            return run_check(args)
+        return _run_and_hook(args)
+    finally:
+        release_lock(lock)
+
+
+def _run_and_hook(args):
     rc = run_update(args)
     if rc == 0 and args.setup and not args.dry_run:
         args.install_hook, args.remove_hook = True, False
