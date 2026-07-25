@@ -32,12 +32,34 @@ Non-technical players can double-click `GTNH-Updater.bat` (Windows) or
 3. **Downloads the client pack** from `downloads.gtnewhorizons.com` — resumable,
    retried, size-verified, and structure-checked before use. Betas and RCs come
    from the `betas/` path automatically.
-4. **Migrates.** `--mode new` (default) installs the new version as a separate
-   instance and copies your user data across, leaving the old one untouched —
-   the method the [GTNH wiki recommends][wiki]. `--mode in-place` replaces
-   `config`, `mods`, `serverutilities`, `libraries`, `patches` and
-   `mmc-pack.json` in the existing instance while merging `journeymap` and
-   `resourcepacks` and keeping your saves and `instance.cfg`.
+4. **Migrates**, in one of two ways — see below.
+
+
+## In-place or a new instance
+
+| How you run it | Default |
+| --- | --- |
+| `--setup`, i.e. the double-click launchers | **in-place** |
+| `--check`, i.e. the launch hook and its "update now" | **in-place** |
+| plain `gtnh-prism-update.py` | **new instance** |
+| nothing installed yet | fresh install |
+
+**in-place** replaces `config`, `mods`, `serverutilities`, `libraries`,
+`patches` and `mmc-pack.json` inside the existing instance, merges `journeymap`
+and `resourcepacks`, and keeps your saves, your `instance.cfg` and everything
+else. The instance is renamed in Prism if its name carried the old version
+number. This is the default for the launcher and hook flow because one instance
+keeps the pre-launch hook attached, keeps auto-detection unambiguous, and avoids
+a pile of folders each holding a stale copy of your saves.
+
+**new instance** installs alongside the old one and copies your user data
+across, leaving the original completely untouched — the method the
+[GTNH wiki recommends][wiki], because a fresh instance cannot inherit a stale
+file. The trade-off is a second full copy of your saves on disk.
+
+Either way the backup happens first, and `--mode new` / `--mode in-place`
+overrides the default anywhere, including `--setup --mode new` (the hook is
+re-pointed at the new instance automatically).
 
 [wiki]: https://wiki.gtnewhorizons.com/wiki/Installing_and_Migrating
 
@@ -64,6 +86,18 @@ network hiccup never blocks you from playing.
 
 Point it at your own server with `--server host:port`, the `GTNH_SERVER`
 environment variable, or by editing `SERVER_ADDRESS` at the top of the script.
+
+
+## Updating the updater
+
+Every run first checks this repository's latest release and, if there is a newer
+one, replaces the script and its launchers and re-runs itself with the same
+arguments. Since the launch hook runs on every press of Play, players end up on
+current code without re-downloading anything by hand.
+
+Failures are deliberately silent-ish and never fatal — offline, rate-limited or
+a read-only folder just logs a line and carries on with the version already
+present. `--no-self-update` turns it off entirely.
 
 
 ## Java
@@ -115,7 +149,8 @@ suitable exists it says so and points at Prism's Java settings. A carried-over
 | `--server HOST:PORT` | server to ask (default: the baked-in `SERVER_ADDRESS`) |
 | `--latest` | target the newest GTNH release instead of the server's version |
 | `--version X` / `--url U` / `--file F` | pin a version, a URL, or a downloaded pack |
-| `--mode new｜in-place` | separate instance (default) or update the existing one |
+| `--mode new｜in-place` | override the default above |
+| `--no-self-update` | don't pull a newer copy of this script first |
 | `--instance DIR` / `--instances-dir DIR` | skip auto-detection |
 | `--backup-mode user｜full｜none` | how much to archive first (default `user`) |
 | `--backup-dir` / `--cache-dir` | where backups and downloads go |

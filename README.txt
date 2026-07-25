@@ -35,6 +35,14 @@ It will:
 
 That's it. Give it time — the pack is about 650 MB.
 
+It updates the GTNH instance you already have, in place: same instance in
+Prism, same worlds, same settings, renamed to the new version number. Nothing
+is deleted, and the backup is taken before any of it. If you would rather keep
+the old version around as a separate instance, add --mode new.
+
+It also keeps itself up to date — each run checks for a newer version of the
+updater and fetches it, so you never have to download this zip again.
+
 
 After that
 ----------
