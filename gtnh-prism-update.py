@@ -107,7 +107,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -1046,6 +1046,17 @@ def run_restore(args):
 # instance.cfg merge
 # --------------------------------------------------------------------------
 
+def cfg_value(path_like):
+    """Format a path for instance.cfg.
+
+    instance.cfg is a Qt QSettings INI file, where backslash is an escape
+    character: a raw C:\\Users\\eric path comes back out as C:Userseric and the
+    launch command cannot start. Prism itself stores paths with forward
+    slashes, which Windows accepts everywhere, so do the same.
+    """
+    return str(path_like).replace("\\", "/")
+
+
 def read_cfg(path: Path):
     out = {}
     if path.is_file():
@@ -1342,7 +1353,7 @@ def apply_java(instance: Path, java_path):
         return
     cfg = read_cfg(cfg_path)
     cfg["OverrideJavaLocation"] = "true"
-    cfg["JavaPath"] = str(java_path)
+    cfg["JavaPath"] = cfg_value(java_path)
     for stale in ("JavaVersion", "JavaTimestamp", "JavaSignature",
                   "JavaArchitecture", "JavaRealArchitecture"):
         cfg.pop(stale, None)
@@ -1449,9 +1460,9 @@ def install_self_near(instance: Path):
 
 
 def hook_command(instance: Path, server, script: Path):
-    quote = lambda s: '"%s"' % s
-    return " ".join([quote(stable_python()), quote(str(script)),
-                     "--check", "--instance", quote(str(instance)),
+    quote = lambda s: '"%s"' % cfg_value(s)
+    return " ".join([quote(stable_python()), quote(script),
+                     "--check", "--instance", quote(instance),
                      "--server", server])
 
 
