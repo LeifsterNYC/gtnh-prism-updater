@@ -171,29 +171,55 @@ def confirm(question, assume_yes):
 
 
 def _dialog(kind, title, message, timeout, default):
-    """Show a Tk dialog that closes itself, so nothing waits on a human forever.
+    """Show a dialog that closes itself, so nothing waits on a human forever.
 
-    A pre-launch command that blocks holds Prism's Play button hostage, so
-    every dialog here has a deadline and a defined answer when it expires.
+    Deliberately NOT tkinter.messagebox: on macOS that is a native NSAlert run
+    by runModalForWindow:, which ignores Tk's event loop — an `after` deadline
+    never fires it and the process blocks until killed, holding Prism's Play
+    button hostage. A plain Toplevel is ours to destroy on time.
     """
     try:
-        import tkinter
-        from tkinter import messagebox
-        root = tkinter.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        root.after(int(timeout * 1000), root.destroy)
-        try:
-            answer = getattr(messagebox, kind)(title, message, master=root)
-        except Exception:
-            return default                       # window died on the deadline
-        try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.title(title)
+        answer = {"value": default}
+
+        def finish(value):
+            answer["value"] = value
             root.destroy()
+
+        frame = tk.Frame(root, padx=22, pady=18)
+        frame.pack(fill="both", expand=True)
+        tk.Label(frame, text=message, justify="left", wraplength=460).pack(anchor="w")
+        buttons = tk.Frame(frame)
+        buttons.pack(anchor="e", pady=(16, 0))
+        if kind == "askyesno":
+            tk.Button(buttons, text="Not now", width=10,
+                      command=lambda: finish(False)).pack(side="right", padx=(8, 0))
+            confirm_button = tk.Button(buttons, text="Update", width=10,
+                                       command=lambda: finish(True))
+        else:
+            confirm_button = tk.Button(buttons, text="OK", width=10, command=lambda: finish(True))
+        confirm_button.pack(side="right")
+
+        root.bind("<Return>", lambda _e: finish(kind == "askyesno" or default))
+        root.bind("<Escape>", lambda _e: finish(default))
+        root.protocol("WM_DELETE_WINDOW", lambda: finish(default))
+        root.after(int(timeout * 1000), root.destroy)   # the deadline that works
+        root.attributes("-topmost", True)
+        root.update_idletasks()
+        width, height = root.winfo_width(), root.winfo_height()
+        root.geometry("+%d+%d" % (max(0, (root.winfo_screenwidth() - width) // 2),
+                                  max(0, (root.winfo_screenheight() - height) // 3)))
+        root.lift()
+        try:
+            confirm_button.focus_force()
         except Exception:
             pass
-        return default if answer is None else answer
+        root.mainloop()                                  # returns once destroyed
+        return answer["value"]
     except Exception:
-        return None                              # no GUI at all
+        return None                                      # no GUI at all
 
 
 def ask_yes_no(title, message, assume_yes=False, timeout=180):
@@ -1552,7 +1578,9 @@ def main(argv=None):
             die("no releases returned by the GitHub API")
         print("Available GTNH versions (nightlies excluded):")
         for v in versions[:25]:
-            if re.search(r"(experimental|daily|dev)", v["version"], re.I):
+            # Date-stamped tags are dev builds; the keyword list also has to
+            # survive upstream typos like "experiemental".
+            if re.search(r"(experi\w*mental|daily|dev|\d{4}-\d{2}-\d{2})", v["version"], re.I):
                 label = "experimental"
             elif v["prerelease"]:
                 label = "pre-release"

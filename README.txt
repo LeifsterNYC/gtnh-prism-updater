@@ -21,7 +21,10 @@ How to use it
 -------------
 Windows : double-click  GTNH-Updater.bat
 Mac      : double-click  gtnh-updater.command
-           (first time: right-click > Open, to get past the security warning)
+           macOS blocks files downloaded from the web. The first time, either
+           RIGHT-CLICK the file and choose Open (then Open again), or run this
+           once in Terminal:
+               xattr -dr com.apple.quarantine ~/Downloads/gtnh-updater
 Linux    : run          ./gtnh-updater.command
 
 It will:
