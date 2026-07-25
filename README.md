@@ -177,7 +177,22 @@ suitable exists it says so and points at Prism's Java settings. A carried-over
 | `--backup-dir` / `--cache-dir` | where backups and downloads go |
 | `--java 17｜8` | which pack flavour to prefer |
 | `--keep-extra-mods` / `--keep-instance-cfg` | carry your mods / your whole instance.cfg |
+| `--status` | one-paste diagnostic: versions, hook, Java, memory, fixes, backups, server |
+| `--keep-backups N` | backups kept per instance, pruned after each new one (default 3; 0 = all) |
 | `--force` / `--dry-run` / `-y` | reinstall, preview, or skip prompts |
+
+## Performance settings
+
+After each update the instance is compared against the [GTNH wiki's guidance][lowend]:
+6144 MB with min = max (unequal or low values cause GC stutter; over 8 GB makes
+G1 slower and is warned about, never auto-changed). Java 8 instances are offered
+the wiki's tuned G1 argument set; Java 17+ instances get **no** GC arguments —
+the wiki is explicit they're built in, and the module flags a modern pack needs
+come from the pack's own `patches/` via Prism. Stale Java-8 GC flags found on a
+Java 17+ setup are removed for the same reason. The pack's bundled changelog
+highlights are printed after each update.
+
+[lowend]: https://wiki.gtnewhorizons.com/wiki/Low_End_PCs
 
 Instance auto-detection covers the usual Prism and MultiMC locations on all
 three platforms, including Flatpak and Snap.

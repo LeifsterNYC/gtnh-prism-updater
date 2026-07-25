@@ -106,6 +106,18 @@ CONFIG_KEEP = ["vendingmachine/favourites", "shaders.properties"]
 # keep and full of settings people tweak by hand.
 BACKUP_EXTRA = ["config", "serverutilities"]
 
+# RAM guidance per the GTNH wiki: 6 GB, min equal to max (unequal values cause
+# GC pauses), and never more than 8 GB (G1 degrades with huge heaps).
+RECOMMEND_MB = 6144
+MAX_SANE_MB = 8192
+
+# The wiki's tuned GC set for Java 8 ONLY. Java 17+ must NOT get these — the
+# wiki is explicit that they are built in there, and the module flags a modern
+# pack needs come from the pack's own patches/ files via Prism.
+JAVA8_ARGS = ("-XX:+UseG1GC -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC "
+              "-XX:MaxGCPauseMillis=80 -Dsun.rmi.dgc.server.gcInterval=2147483646 "
+              "-XX:G1NewSizePercent=20 -XX:G1ReservePercent=20")
+
 # instance.cfg keys carried from the old instance to the new one. Deliberately
 # excludes JvmArgs, which are Java-version specific and a common way to break
 # a fresh instance; use --keep-instance-cfg to copy the whole file instead.
@@ -124,7 +136,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.4.2"
+__version__ = "1.5.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -1627,6 +1639,133 @@ def ensure_java(instance: Path, pack_name, dry_run, assume_yes):
     return None
 
 
+def tune_performance(instance: Path, java_ver, assume_yes, dry_run):
+    """Bring memory and GC arguments in line with the GTNH wiki's guidance.
+
+    One combined offer, applied in a single write: 6 GB with min == max, the
+    tuned G1 set on Java 8, and no GC arguments at all on Java 17+ (stale
+    Java-8 flags carried into a modern setup get cleared, per the wiki).
+    """
+    cfg_path = instance / "instance.cfg"
+    if not cfg_path.is_file():
+        return
+    cfg = read_cfg(cfg_path)
+    changes, notes = {}, []
+
+    min_mb = int(cfg.get("MinMemAlloc") or 0)
+    max_mb = int(cfg.get("MaxMemAlloc") or 0)
+    if max_mb > MAX_SANE_MB:
+        warn("this instance has %d MB allocated — over 8 GB the garbage collector "
+             "gets slower, not faster. Consider 6144." % max_mb)
+    elif max_mb < RECOMMEND_MB or min_mb != max_mb:
+        changes.update({"OverrideMemory": "true",
+                        "MinMemAlloc": str(RECOMMEND_MB), "MaxMemAlloc": str(RECOMMEND_MB)})
+        notes.append("memory %s -> 6144 MB min and max (unequal or low values cause GC stutter)"
+                     % ("%d/%d MB" % (min_mb, max_mb) if max_mb else "unset"))
+
+    args_now = cfg.get("JvmArgs", "").strip().strip('"')
+    if java_ver == 8:
+        if not args_now:
+            changes.update({"OverrideJavaArgs": "true", "JvmArgs": JAVA8_ARGS})
+            notes.append("Java 8 tuned G1 garbage-collector arguments (from the GTNH wiki)")
+    elif java_ver and java_ver >= 17 and re.search(r"-XX:\+UseG1GC|MaxGCPauseMillis|G1NewSizePercent", args_now):
+        changes.update({"OverrideJavaArgs": "false", "JvmArgs": ""})
+        notes.append("removing Java-8-era GC arguments — on Java %d they are already built in "
+                     "and the wiki says not to use them" % java_ver)
+
+    if not changes:
+        log("perf:       memory and Java arguments already follow the wiki guidance")
+        return
+    for n in notes:
+        log("perf:       %s" % n)
+    if dry_run:
+        return
+    if not confirm("Apply these performance settings?", assume_yes):
+        return
+    cfg.update(changes)
+    try:
+        write_cfg(cfg_path, cfg)
+        log("perf:       applied")
+    except OSError as e:
+        warn("could not save performance settings (%s)" % e)
+
+
+def prune_backups(instance: Path, backup_dir: Path, keep):
+    """Delete all but the newest `keep` backups for this instance."""
+    if keep <= 0:
+        return
+    for stale in find_backups(instance, backup_dir)[keep:]:
+        size = stale.stat().st_size
+        try:
+            stale.unlink()
+            log("backup:     pruned %s (%s) — keeping the newest %d" % (stale.name, human(size), keep))
+        except OSError as e:
+            warn("could not prune %s (%s)" % (stale.name, e))
+
+
+def show_changelog(instance: Path, version):
+    """Print the highlights of the changelog the pack ships for this hop."""
+    mc = mc_dir(instance)
+    if not mc:
+        return
+    match = None
+    for f in mc.glob("changelog from * to *.md"):
+        if version in f.name:
+            match = f
+            break
+    if not match:
+        return
+    lines = [l.rstrip() for l in match.read_text(encoding="utf-8", errors="replace").splitlines()]
+    shown = 0
+    print()
+    log("what's new (%s):" % match.name)
+    for line in lines:
+        if not line.strip():
+            continue
+        print("      %s" % line[:110])
+        shown += 1
+        if shown >= 12:
+            print("      ... full changelog: %s" % match)
+            break
+
+
+def run_status(args):
+    """Everything support needs in one paste."""
+    print("gtnh-updater %s" % __version__)
+    print("  config    : %s" % config_path())
+    cfg = load_config()
+    print("              %s" % (json.dumps(cfg) if cfg else "(none yet — first run not done)"))
+    server = args.server or cfg.get("server") or os.environ.get("GTNH_SERVER")
+    inst = pick_instance(args.instance, True, allow_none=True)
+    if inst is None:
+        print("  instance  : none found")
+        return 0
+    icfg = read_cfg(inst / "instance.cfg")
+    print("  instance  : %s" % inst)
+    print("  pack      : %s" % instance_version(inst))
+    hook = icfg.get("PreLaunchCommand", "")
+    print("  hook      : %s" % ("installed" if "gtnh-prism-update" in hook else "NOT installed"))
+    java = icfg.get("JavaPath", "").strip('"').replace("\\\\", "\\").replace('\\"', '"')
+    print("  java      : %s (major %s)" % (java or "(Prism default)", java_major(java) if java else "?"))
+    print("  memory    : min %s / max %s MB" % (icfg.get("MinMemAlloc", "?"), icfg.get("MaxMemAlloc", "?")))
+    print("  jvm args  : %s" % (icfg.get("JvmArgs") or "(none — correct for Java 17+)"))
+    mods = (mc_dir(inst) or inst) / "mods"
+    for fix in MOD_FIXES:
+        jars = sorted(p.name for p in mods.glob("*.jar") if mod_key(p.name) == fix["mod"]) if mods.is_dir() else []
+        print("  fix %-6s: %s (want >= %s)" % (fix["mod"][:6], ", ".join(jars) or "not present", fix["fixed_in"]))
+    backup_dir = (Path(args.backup_dir).expanduser() if args.backup_dir
+                  else inst.parent.parent / "GTNH-Backups")
+    backups = find_backups(inst, backup_dir)
+    print("  backups   : %d in %s%s" % (len(backups), backup_dir,
+          " (newest: %s)" % backups[0].name if backups else ""))
+    if server:
+        status = probe_server(server)
+        print("  server    : %s -> %s" % (server, status.get("version") or status.get("error")))
+    else:
+        print("  server    : not configured")
+    return 0
+
+
 # --------------------------------------------------------------------------
 # launch-time check + Prism pre-launch hook
 # --------------------------------------------------------------------------
@@ -1800,6 +1939,11 @@ def parse_args(argv):
                    help="you don't; skip our address and our mod fixes")
     p.add_argument("--reconfigure", action="store_true",
                    help="ask the first-run questions again")
+    p.add_argument("--status", action="store_true",
+                   help="print a full diagnostic (instance, versions, hook, fixes, backups)")
+    p.add_argument("--keep-backups", type=int, default=3, metavar="N",
+                   help="backups to keep per instance, oldest pruned after each new one "
+                        "(default: %(default)s; 0 keeps everything)")
     p.add_argument("--latest", action="store_true",
                    help="target the newest GTNH release instead of the version the server runs")
     p.add_argument("--version", help="version to install (default: whatever the server runs)")
@@ -1890,6 +2034,8 @@ def main(argv=None):
                 label = "stable"
             print("  %-32s %s  %s" % (v["version"], v["published"], label))
         return 0
+    if args.status:
+        return run_status(args)
     if args.restore is not None:
         return run_restore(args)
     if args.install_hook or args.remove_hook:
@@ -2046,6 +2192,8 @@ def run_update(args):
     backup = None
     if old is not None and args.backup_mode != "none":
         backup = make_backup(old, backup_dir, args.backup_mode, old_version, args.dry_run, args.yes)
+        if backup is not None and not args.dry_run:
+            prune_backups(old, backup_dir, args.keep_backups)
 
     # ---- 2. fetch --------------------------------------------------------
     if pack is None:
@@ -2087,6 +2235,11 @@ def run_update(args):
     if not args.dry_run:
         apply_java(target, java_choice)
     apply_mod_fixes(target, squad, args.dry_run)
+    final_java = java_choice or read_cfg(target / "instance.cfg").get("JavaPath", "").strip('"')
+    tune_performance(target, java_major(final_java) if final_java else None,
+                     args.yes, args.dry_run)
+    if not args.dry_run:
+        show_changelog(target, version)
 
     if not args.keep_download and url and not args.dry_run:
         try:
