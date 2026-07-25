@@ -1185,8 +1185,9 @@ def migrate_in_place(instance: Path, zip_path: Path, version, keep_extra, dry_ru
     log("in-place update of %s -> %s" % (instance.name, version))
     print("      replace: %s" % ", ".join(["%s/%s" % (mc.name, e) for e in replace_mc] + replace_root))
     print("      merge:   %s" % ", ".join("%s/%s" % (mc.name, e) for e in merge_mc))
+    touched = set(replace_mc) | set(merge_mc)
     print("      keep:    instance.cfg, %s" % ", ".join(
-        r for r in CARRY_OVER if (mc / r).exists() and r.split("/")[0] not in replace_mc))
+        r for r in CARRY_OVER if (mc / r).exists() and r.split("/")[0] not in touched))
 
     if dry_run:
         report_extra_mods(extras, mc / "mods", keep_extra, dry_run)
@@ -1303,10 +1304,26 @@ def candidate_javas(instance: Path):
     return found
 
 
+def launcher_java(java_path):
+    """Prefer javaw.exe for the setting Prism launches with.
+
+    java.exe is the console-subsystem binary: Minecraft would run with a
+    console window attached for the whole session. Probing still uses
+    java.exe, which is the one that reliably prints -version.
+    """
+    java_path = Path(java_path)
+    if IS_WIN and java_path.name.lower() == "java.exe":
+        windowless = java_path.with_name("javaw.exe")
+        if windowless.is_file():
+            return windowless
+    return java_path
+
+
 def apply_java(instance: Path, java_path):
     """Write a decided Java into an instance. Never prompts, never raises."""
     if not java_path:
         return
+    java_path = launcher_java(java_path)
     cfg_path = instance / "instance.cfg"
     if not cfg_path.is_file():
         warn("no instance.cfg at %s — set Java for this instance in Prism yourself." % cfg_path)
@@ -1435,6 +1452,8 @@ def manage_hook(args):
             log("no update check installed on %s" % inst.name)
             return 0
         cfg["PreLaunchCommand"] = ""
+        if not cfg.get("PostExitCommand") and not cfg.get("WrapperCommand"):
+            cfg["OverrideCommands"] = "false"   # don't leave the box ticked for nothing
         write_cfg(cfg_path, cfg)
         log("removed the launch-time update check from %s" % inst.name)
         return 0
