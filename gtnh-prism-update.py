@@ -166,7 +166,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.6.1"
+__version__ = "1.7.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -1366,25 +1366,61 @@ def cfg_set(cfg, key, value):
     cfg[key] = ini_escape(value)
 
 
-def read_cfg(path: Path):
-    out = {}
+def read_cfg(path: Path, section="General"):
+    """Read one section of an INI file. Other sections are none of our business."""
+    out, current = {}, None
     if path.is_file():
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if "=" in line and not line.lstrip().startswith("#"):
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                current = stripped[1:-1]
+                continue
+            if current in (None, section) and "=" in line and not stripped.startswith("#"):
                 k, v = line.split("=", 1)
                 out[k.strip()] = v.strip()
     return out
 
 
-def write_cfg(path: Path, data):
+def write_cfg(path: Path, data, section="General"):
+    """Update one section in place, leaving the rest of the file untouched.
+
+    Prism keeps a [UI] section (column layouts and such) alongside [General].
+    Rewriting the whole file as one flat section destroys it, so edit lines
+    where they sit and copy everything else through verbatim.
+    """
     if not path.parent.is_dir():
         raise FileNotFoundError("instance folder is gone: %s" % path.parent)
-    lines = ["[General]"] if "[General]" not in data else []
-    body = "\n".join("%s=%s" % (k, v) for k, v in data.items() if k != "[General]")
+    original = (path.read_text(encoding="utf-8", errors="replace").splitlines()
+                if path.is_file() else [])
+    out, seen, current, section_end = [], set(), None, None
+    for line in original:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if current == section and section_end is None:
+                section_end = len(out)          # leaving our section: new keys go here
+            current = stripped[1:-1]
+            out.append(line)
+            continue
+        if current in (None, section) and "=" in line and not stripped.startswith("#"):
+            key = line.split("=", 1)[0].strip()
+            if key in data:
+                out.append("%s=%s" % (key, data[key]))
+                seen.add(key)
+            continue                            # key dropped from data: drop the line
+        out.append(line)
+
+    fresh = ["%s=%s" % (k, v) for k, v in data.items() if k not in seen]
+    if not original:
+        out = ["[%s]" % section] + fresh
+    elif section_end is not None:
+        out[section_end:section_end] = fresh
+    else:
+        out.extend(fresh)
+
     # Write beside the target and swap it in, so a failure never leaves Prism
     # with a half-written instance.cfg.
     tmp = path.with_name(path.name + ".gtnh-tmp")
-    tmp.write_text("\n".join(lines + [body]) + "\n", encoding="utf-8")
+    tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
     os.replace(str(tmp), str(path))
 
 
@@ -1839,6 +1875,8 @@ def run_status(args):
     print("  pack      : %s" % instance_version(inst))
     hook = icfg.get("PreLaunchCommand", "")
     print("  hook      : %s" % ("installed" if "gtnh-prism-update" in hook else "NOT installed"))
+    print("  prism     : %s" % ("RUNNING — settings written now will be overwritten when it closes"
+                                if prism_running() else "closed"))
     java = icfg.get("JavaPath", "").strip('"').replace("\\\\", "\\").replace('\\"', '"')
     print("  java      : %s (major %s)" % (java or "(Prism default)", java_major(java) if java else "?"))
     print("  memory    : min %s / max %s MB" % (icfg.get("MinMemAlloc", "?"), icfg.get("MaxMemAlloc", "?")))
@@ -1863,6 +1901,43 @@ def run_status(args):
 # --------------------------------------------------------------------------
 # launch-time check + Prism pre-launch hook
 # --------------------------------------------------------------------------
+
+def prism_running():
+    """Is Prism open right now?
+
+    Prism holds instance settings in memory and writes its own copy back when
+    it closes, silently undoing anything we wrote to instance.cfg in the
+    meantime. Checked once and cached.
+    """
+    if getattr(prism_running, "cached", None) is not None:
+        return prism_running.cached
+    running = False
+    try:
+        if IS_WIN:
+            result = subprocess.run(["tasklist", "/FI", "IMAGENAME eq prismlauncher.exe", "/NH"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=20, **quiet_process_kwargs())
+            running = b"prismlauncher.exe" in (result.stdout or b"").lower()
+        else:
+            for name in ("prismlauncher", "PrismLauncher", "multimc", "MultiMC"):
+                if subprocess.run(["pgrep", "-x", name], stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=10).returncode == 0:
+                    running = True
+                    break
+    except (OSError, subprocess.SubprocessError):
+        running = False
+    prism_running.cached = running
+    return running
+
+
+def warn_if_prism_open(what):
+    if not prism_running():
+        return False
+    warn("Prism Launcher is open. It keeps its own copy of the instance settings and "
+         "will overwrite %s when it closes.\n"
+         "         Close Prism, then run this again so the change sticks." % what)
+    return True
+
 
 def stable_python():
     """An interpreter path that will still exist next month.
@@ -1924,6 +1999,8 @@ def manage_hook(args):
     cfg["OverrideCommands"] = "true"
     cfg_set(cfg, "PreLaunchCommand", hook_command(inst, args.server, install_self_near(inst)))
     write_cfg(cfg_path, cfg)
+    if warn_if_prism_open("the launch check"):
+        return 1
     log("installed the launch-time update check on %s" % inst.name)
     print("      every time you press Play, it pings %s and offers to update" % args.server)
     print("      if the server is on a different version. Remove it with --remove-hook.")
@@ -2269,6 +2346,10 @@ def run_update(args):
 
     if args.mode == "in-place" and args.backup_mode == "none" and not args.dry_run:
         warn("in-place update with no backup — there is no way back if this goes wrong.")
+    if not args.dry_run and prism_running():
+        warn("Prism Launcher is open. Close it before updating — Prism rewrites "
+             "instance settings when it exits, undoing the Java, memory and "
+             "launch-check changes made here.")
     if not args.dry_run and not confirm("Close Prism Launcher first. Proceed?", args.yes):
         log("aborted, nothing changed")
         return 1
