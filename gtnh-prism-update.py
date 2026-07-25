@@ -130,6 +130,22 @@ MOD_EXTRAS = [
         "why": "drops CPU/GPU load and mutes sound while AFK or tabbed out (client-side, "
                "from the wiki's Additional Mods list)",
     },
+    {
+        # GTNH's own WorldEdit fork. Client-side this enables single-player
+        # editing; on the squad server it works only if the server runs it too.
+        "match": "worldedit-v",
+        "packs": "2.9",
+        "jar": "worldedit-v0.0.10.jar",
+        "url": "https://github.com/GTNewHorizons/worldedit-gtnh/releases/download/v0.0.10/worldedit-v0.0.10.jar",
+        "why": "WorldEdit (GTNH fork) — //wand, //copy, //paste in single-player",
+    },
+    {
+        "match": "worldeditcui",
+        "packs": "2.9",
+        "jar": "WorldEditCuiFe-v1.0.7-mf-1.7.10-10.13.4.1566.jar",
+        "url": "https://mediafilez.forgecdn.net/files/2390/420/WorldEditCuiFe-v1.0.7-mf-1.7.10-10.13.4.1566.jar",
+        "why": "WorldEdit CUI — draws your WorldEdit selections in the world",
+    },
 ]
 
 # instance.cfg keys carried from the old instance to the new one. Deliberately
@@ -150,7 +166,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
