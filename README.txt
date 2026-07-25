@@ -35,10 +35,10 @@ at your own server; --reconfigure asks again.)
 It will:
   * check that your Java works with the version it installs, and switch the
     instance to a Java that does if it finds one
-  * apply our pinned mod fixes and extras (Angelica 2.1.51 fix, FPS Reducer,
-    borderless fullscreen; which fixes the
-    personal dimension rendering only the block you stand in when clouds are
-    off) — each fix retires itself once the pack ships that version
+  * apply our pinned mod fixes and extras: the Angelica 2.1.51 fix (personal
+    dimension rendering only the block you stand in when clouds are off),
+    FPS Reducer (quiet and cheap while tabbed out), and borderless
+    fullscreen — fixes retire themselves once the pack ships them
   * ask the server which GTNH version it is running
   * install that version if you have no GTNH instance yet
   * update your existing instance to it if they differ
