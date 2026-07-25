@@ -107,7 +107,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -1070,6 +1070,22 @@ def cfg_value(path_like):
     return str(path_like).replace("\\", "/")
 
 
+def ini_escape(value):
+    """Encode a value the way Qt's QSettings would write it.
+
+    Qt treats " as a section delimiter and strips it, gluing '"a" "b"' into
+    'ab' — which is exactly how a perfectly good launch command turns into one
+    nonexistent path. Qt writes them as \\" and reads that back verbatim;
+    checked against QSettings itself, not deduced.
+    """
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def cfg_set(cfg, key, value):
+    """Set a value we own, encoded for Qt. Values we never touch stay verbatim."""
+    cfg[key] = ini_escape(value)
+
+
 def read_cfg(path: Path):
     out = {}
     if path.is_file():
@@ -1367,7 +1383,7 @@ def apply_java(instance: Path, java_path):
         return
     cfg = read_cfg(cfg_path)
     cfg["OverrideJavaLocation"] = "true"
-    cfg["JavaPath"] = cfg_value(java_path)
+    cfg_set(cfg, "JavaPath", cfg_value(java_path))
     for stale in ("JavaVersion", "JavaTimestamp", "JavaSignature",
                   "JavaArchitecture", "JavaRealArchitecture"):
         cfg.pop(stale, None)
@@ -1495,7 +1511,7 @@ def manage_hook(args):
         log("removed the launch-time update check from %s" % inst.name)
         return 0
     cfg["OverrideCommands"] = "true"
-    cfg["PreLaunchCommand"] = hook_command(inst, args.server, install_self_near(inst))
+    cfg_set(cfg, "PreLaunchCommand", hook_command(inst, args.server, install_self_near(inst)))
     write_cfg(cfg_path, cfg)
     log("installed the launch-time update check on %s" % inst.name)
     print("      every time you press Play, it pings %s and offers to update" % args.server)
