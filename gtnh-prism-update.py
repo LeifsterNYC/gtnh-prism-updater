@@ -170,7 +170,33 @@ def confirm(question, assume_yes):
         return False
 
 
-def ask_yes_no(title, message, assume_yes=False):
+def _dialog(kind, title, message, timeout, default):
+    """Show a Tk dialog that closes itself, so nothing waits on a human forever.
+
+    A pre-launch command that blocks holds Prism's Play button hostage, so
+    every dialog here has a deadline and a defined answer when it expires.
+    """
+    try:
+        import tkinter
+        from tkinter import messagebox
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        root.after(int(timeout * 1000), root.destroy)
+        try:
+            answer = getattr(messagebox, kind)(title, message, master=root)
+        except Exception:
+            return default                       # window died on the deadline
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return default if answer is None else answer
+    except Exception:
+        return None                              # no GUI at all
+
+
+def ask_yes_no(title, message, assume_yes=False, timeout=180):
     """Yes/no question — a real dialog box when one is possible, else the terminal.
 
     Prism runs pre-launch commands without a usable stdin, so the dialog is
@@ -179,31 +205,15 @@ def ask_yes_no(title, message, assume_yes=False):
     if assume_yes:
         return True
     print(message, flush=True)
-    try:
-        import tkinter
-        from tkinter import messagebox
-        root = tkinter.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        answer = messagebox.askyesno(title, message)
-        root.destroy()
-        return bool(answer)
-    except Exception:
+    answer = _dialog("askyesno", title, message, timeout, False)
+    if answer is None:
         return confirm("Continue?", False)
+    return bool(answer)
 
 
-def show_message(title, message):
+def show_message(title, message, timeout=60):
     print(message, flush=True)
-    try:
-        import tkinter
-        from tkinter import messagebox
-        root = tkinter.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        messagebox.showinfo(title, message)
-        root.destroy()
-    except Exception:
-        pass
+    _dialog("showinfo", title, message, timeout, True)
 
 
 # --------------------------------------------------------------------------
@@ -656,10 +666,20 @@ def open_pack(zip_path: Path):
     return zf, root
 
 
+def staging_dir(near: Path, tag):
+    """Scratch space on the same volume as `near`, but never inside the
+    instances folder — Prism scans that and will load a half-extracted pack as
+    a real instance while the update is still running."""
+    parent = near.parent
+    if parent.name == "instances":
+        parent = parent.parent
+    return parent / (".gtnh-%s-%d" % (tag, os.getpid()))
+
+
 def extract_pack(zip_path: Path, target: Path):
     zf, root = open_pack(zip_path)
     with zf:
-        staging = target.parent / (".gtnh-extract-%d" % os.getpid())
+        staging = staging_dir(target, "extract")
         rmtree(staging)
         staging.mkdir(parents=True)
         members = zf.infolist()
@@ -754,17 +774,22 @@ def instance_version(instance: Path):
         v = stamp.read_text(encoding="utf-8", errors="replace").strip().splitlines()
         if v and v[0]:
             return v[0]
+    # What the instance calls itself beats a changelog: packs updated by hand
+    # keep the changelog of whichever version first shipped it.
+    for text in (read_cfg(instance / "instance.cfg").get("name", ""), instance.name):
+        m = re.search(r"\d+\.\d+(?:\.\d+)?(?:[-_](?:beta|rc|alpha|pre)[-_]?\d*)?", text)
+        if m:
+            return m.group(0)
     mc = mc_dir(instance)
     if mc:
-        newest, newest_mtime = None, -1
+        best = None
         for f in mc.glob("changelog from * to *.md"):
             m = re.search(r"to (.+)\.md$", f.name)
-            if m and f.stat().st_mtime > newest_mtime:
-                newest, newest_mtime = m.group(1), f.stat().st_mtime
-        if newest:
-            return newest
-    m = re.search(r"(\d+\.\d+\.\d+[\w.\-]*)", instance.name)
-    return m.group(1) if m else "unknown"
+            if m and (best is None or version_tuple(m.group(1)) > version_tuple(best)):
+                best = m.group(1)
+        if best:
+            return best
+    return "unknown"
 
 
 def is_gtnh_instance(instance: Path):
@@ -862,15 +887,15 @@ def make_backup(instance: Path, backup_dir: Path, mode, version, dry_run, assume
         warn("nothing to back up in %s" % instance)
         return None
     total = sum(tree_size(p) for p, _ in items)
-    backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest = backup_dir / ("%s_%s_%s.zip" % (re.sub(r"[^\w.\-]+", "_", instance.name), version, stamp))
 
     log("backup (%s): %s of data -> %s" % (mode, human(total), dest))
     for p, arc in items:
         print("      + %s (%s)" % (arc, human(tree_size(p))))
-    if dry_run:
+    if dry_run:                       # a dry run must not even create the folder
         return dest
+    backup_dir.mkdir(parents=True, exist_ok=True)
 
     free = shutil.disk_usage(str(backup_dir)).free
     if free < total * 0.6:
@@ -994,9 +1019,15 @@ def read_cfg(path: Path):
 
 
 def write_cfg(path: Path, data):
+    if not path.parent.is_dir():
+        raise FileNotFoundError("instance folder is gone: %s" % path.parent)
     lines = ["[General]"] if "[General]" not in data else []
     body = "\n".join("%s=%s" % (k, v) for k, v in data.items() if k != "[General]")
-    path.write_text("\n".join(lines + [body]) + "\n", encoding="utf-8")
+    # Write beside the target and swap it in, so a failure never leaves Prism
+    # with a half-written instance.cfg.
+    tmp = path.with_name(path.name + ".gtnh-tmp")
+    tmp.write_text("\n".join(lines + [body]) + "\n", encoding="utf-8")
+    os.replace(str(tmp), str(path))
 
 
 def merge_instance_cfg(old_instance: Path, new_instance: Path, new_name, keep_whole, dry_run):
@@ -1092,6 +1123,10 @@ def migrate_new_instance(old: Path, zip_path: Path, instances_root: Path, versio
 
 def migrate_in_place(instance: Path, zip_path: Path, version, keep_extra, dry_run):
     mc = mc_dir(instance)
+    if mc is None or not (instance / "instance.cfg").is_file():
+        die("%s is not a usable instance any more (no %s or instance.cfg).\n"
+            "       Nothing was changed. If it vanished, restore it with --restore."
+            % (instance, ".minecraft"))
     if zip_path is None:  # dry run without the pack on disk
         log("in-place update of %s -> %s" % (instance.name, version))
         print("      replace: %s/{config,mods,serverutilities}, libraries, patches, mmc-pack.json"
@@ -1131,7 +1166,7 @@ def migrate_in_place(instance: Path, zip_path: Path, version, keep_extra, dry_ru
         report_extra_mods(extras, mc / "mods", keep_extra, dry_run)
         return instance
 
-    staging = instance.parent / (".gtnh-new-%s-%d" % (re.sub(r"[^\w.\-]+", "_", version), os.getpid()))
+    staging = staging_dir(instance, "new-%s" % re.sub(r"[^\w.\-]+", "_", version))
     extract_pack(zip_path, staging)
     try:
         # Stash the user files that live inside the config folder we replace.
@@ -1213,6 +1248,9 @@ def candidate_javas(instance: Path):
     globs = []
     for root in candidate_instance_dirs():          # <prism data>/instances
         globs.append(root.parent / "java" / "*" / "bin" / exe)
+        # Prism's downloaded runtimes are bundles on macOS.
+        globs.append(root.parent / "java" / "*" / "jre.bundle" / "Contents" / "Home" / "bin" / exe)
+        globs.append(root.parent / "java" / "*" / "Contents" / "Home" / "bin" / exe)
     if IS_WIN:
         for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
             base = os.environ.get(var)
@@ -1239,13 +1277,46 @@ def candidate_javas(instance: Path):
     return found
 
 
+def apply_java(instance: Path, java_path):
+    """Write a decided Java into an instance. Never prompts, never raises."""
+    if not java_path:
+        return
+    cfg_path = instance / "instance.cfg"
+    if not cfg_path.is_file():
+        warn("no instance.cfg at %s — set Java for this instance in Prism yourself." % cfg_path)
+        return
+    cfg = read_cfg(cfg_path)
+    cfg["OverrideJavaLocation"] = "true"
+    cfg["JavaPath"] = str(java_path)
+    for stale in ("JavaVersion", "JavaTimestamp", "JavaSignature",
+                  "JavaArchitecture", "JavaRealArchitecture"):
+        cfg.pop(stale, None)
+    try:
+        write_cfg(cfg_path, cfg)
+    except OSError as e:
+        warn("could not save the Java setting (%s) — set it in Prism yourself" % e)
+        return
+    log("java:       instance set to %s" % java_path)
+
+
 def ensure_java(instance: Path, pack_name, dry_run, assume_yes):
-    """Make sure the instance points at a Java the new pack can actually run."""
+    """Make sure the instance points at a Java the new pack can actually run.
+
+    Asked BEFORE anything is downloaded or written: this prompt used to run
+    after the migration, and anything that happened to the instance while it
+    waited (Prism deleting it, say) turned into a crash at the very end.
+    Returns the Java to write once the update is done, or None.
+    """
     wanted = pack_java_range(pack_name)
     if not wanted:
-        return
+        return None
     low, high = wanted
     cfg_path = instance / "instance.cfg"
+    if not cfg_path.is_file():
+        warn("no instance.cfg at %s — skipping the Java check.\n"
+             "         Set Java %s for this instance in Prism yourself."
+             % (cfg_path, "%d-%d" % (low, high) if low != high else low))
+        return None
     cfg = read_cfg(cfg_path)
     current = cfg.get("JavaPath", "").strip('"')
 
@@ -1273,28 +1344,58 @@ def ensure_java(instance: Path, pack_name, dry_run, assume_yes):
         warn("no Java %s found on this computer — in Prism open Settings > Java and let it "
              "download one, or Edit Instance > Settings > Java" %
              ("%d-%d" % (low, high) if low != high else low))
-        return
+        return None
     best = sorted(fits)[-1]
     if not current and not cfg.get("OverrideJavaLocation"):
         log("java:       Java %s available at %s if Prism's default is wrong" % best)
-        return
-    if not dry_run and confirm("Point this instance at Java %s (%s)?" % best, assume_yes):
-        cfg["OverrideJavaLocation"] = "true"
-        cfg["JavaPath"] = str(best[1])
-        for stale in ("JavaVersion", "JavaTimestamp", "JavaSignature",
-                      "JavaArchitecture", "JavaRealArchitecture"):
-            cfg.pop(stale, None)
-        write_cfg(cfg_path, cfg)
-        log("java:       switched the instance to Java %s (%s)" % best)
+        return None
+    if dry_run:
+        log("java:       would offer to switch the instance to Java %s (%s)" % best)
+        return None
+    if confirm("Point this instance at Java %s (%s) after updating?" % best, assume_yes):
+        return best[1]
+    return None
 
 
 # --------------------------------------------------------------------------
 # launch-time check + Prism pre-launch hook
 # --------------------------------------------------------------------------
 
-def hook_command(instance: Path, server):
+def stable_python():
+    """An interpreter path that will still exist next month.
+
+    sys.executable on macOS often points inside the Command Line Tools bundle,
+    which OS upgrades relocate; /usr/bin/python3 is the stub that survives.
+    """
+    if platform.system() == "Darwin" and "CommandLineTools" in sys.executable:
+        if Path("/usr/bin/python3").exists():
+            return "/usr/bin/python3"
+    return sys.executable
+
+
+def install_self_near(instance: Path):
+    """Keep the copy the hook calls somewhere permanent.
+
+    Left in ~/Downloads it gets cleaned up or moved, and then Prism refuses to
+    launch at all because its pre-launch command fails.
+    """
+    script = Path(os.path.abspath(__file__))
+    home = instance.parent.parent if instance.parent.name == "instances" else instance.parent
+    target = home / "gtnh-prism-update.py"
+    try:
+        if target.resolve() != script.resolve():
+            shutil.copy2(str(script), str(target))
+            log("copied the updater to %s so the launch check keeps working" % target)
+        return target
+    except OSError as e:
+        warn("could not copy the updater next to Prism (%s) — the launch check will "
+             "call it where it is now, so don't move or delete %s" % (e, script))
+        return script
+
+
+def hook_command(instance: Path, server, script: Path):
     quote = lambda s: '"%s"' % s
-    return " ".join([quote(sys.executable), quote(os.path.abspath(__file__)),
+    return " ".join([quote(stable_python()), quote(str(script)),
                      "--check", "--instance", quote(str(instance)),
                      "--server", server])
 
@@ -1312,7 +1413,7 @@ def manage_hook(args):
         log("removed the launch-time update check from %s" % inst.name)
         return 0
     cfg["OverrideCommands"] = "true"
-    cfg["PreLaunchCommand"] = hook_command(inst, args.server)
+    cfg["PreLaunchCommand"] = hook_command(inst, args.server, install_self_near(inst))
     write_cfg(cfg_path, cfg)
     log("installed the launch-time update check on %s" % inst.name)
     print("      every time you press Play, it pings %s and offers to update" % args.server)
@@ -1353,6 +1454,9 @@ def run_check(args):
     args.instance = str(inst)
     args.yes = True
     rc = run_update(args)
+    if args.dry_run:
+        log("dry run — the launch is not being cancelled.")
+        return 0
     if rc == 0:
         show_message("GTNH updated",
                      "Updated to %s.\n\nPress Play again to start the game." % server_ver)
@@ -1448,8 +1552,13 @@ def main(argv=None):
             die("no releases returned by the GitHub API")
         print("Available GTNH versions (nightlies excluded):")
         for v in versions[:25]:
-            print("  %-22s %s  %s" % (v["version"], v["published"],
-                                      "pre-release" if v["prerelease"] else "stable"))
+            if re.search(r"(experimental|daily|dev)", v["version"], re.I):
+                label = "experimental"
+            elif v["prerelease"]:
+                label = "pre-release"
+            else:
+                label = "stable"
+            print("  %-32s %s  %s" % (v["version"], v["published"], label))
         return 0
     if args.restore is not None:
         return run_restore(args)
@@ -1562,7 +1671,16 @@ def run_update(args):
         log("aborted, nothing changed")
         return 1
 
-    # ---- 1. backup, always first ----------------------------------------
+    # ---- 1. settle the Java question while nothing is at stake ----------
+    pack_name = Path(url or pack or "").name
+    java_choice = None
+    if old is not None:
+        java_choice = ensure_java(old, pack_name, args.dry_run, args.yes)
+    elif pack_java_range(pack_name):
+        low, high = pack_java_range(pack_name)
+        log("java:       this pack needs Java %s" % ("%d-%d" % (low, high) if low != high else low))
+
+    # ---- 2. backup ------------------------------------------------------
     backup = None
     if old is not None and args.backup_mode != "none":
         backup = make_backup(old, backup_dir, args.backup_mode, old_version, args.dry_run, args.yes)
@@ -1600,12 +1718,12 @@ def run_update(args):
             log("renamed the instance to %r in Prism" % cfg["name"])
     run_update.target = target
 
-    pack_name = Path(url or pack or "").name
+    if not args.dry_run and not (target / "instance.cfg").is_file():
+        die("the instance folder %s is not there after the update.\n"
+            "       Close Prism and restore it with:  --restore --instance \"%s\"%s"
+            % (target, target, "\n       Your backup: %s" % backup if backup else ""))
     if not args.dry_run:
-        ensure_java(target, pack_name, args.dry_run, args.yes)
-    elif pack_java_range(pack_name):
-        low, high = pack_java_range(pack_name)
-        log("java:       this pack needs Java %s" % ("%d-%d" % (low, high) if low != high else low))
+        apply_java(target, java_choice)
 
     if not args.keep_download and url and not args.dry_run:
         try:
