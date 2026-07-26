@@ -54,6 +54,11 @@ MOD_FIXES = [
         "mod": "angelica",
         "packs": "2.9",              # only packs this jar is built against
         "fixed_in": "2.1.51",
+        # Take the newest release from here rather than pinning the exact fix:
+        # pinning leaves people behind every later patch, and looks like a
+        # downgrade to anyone who had already updated the mod themselves.
+        "repo": "GTNewHorizons/Angelica",
+        "jar_pattern": "angelica-%s.jar",
         "jar": "angelica-2.1.51.jar",
         "url": "https://github.com/GTNewHorizons/Angelica/releases/download/2.1.51/angelica-2.1.51.jar",
         "why": "Angelica #1916 / PR #1917: with clouds disabled the personal dimension's "
@@ -166,7 +171,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -400,6 +405,32 @@ def resolve_server(args):
 # mod fixes
 # --------------------------------------------------------------------------
 
+def newest_fix_release(fix):
+    """Newest published release of a fixed mod, or None if GitHub is unreachable.
+
+    Returns (version, jar name, url). Only releases at or above the version
+    that carries the fix are considered.
+    """
+    if not fix.get("repo") or not fix.get("jar_pattern"):
+        return None
+    try:
+        releases = http_json("https://api.github.com/repos/%s/releases?per_page=20" % fix["repo"])
+    except Exception:
+        return None
+    best = None
+    for release in releases:
+        tag = (release.get("tag_name") or "").lstrip("vV")
+        if release.get("draft") or release.get("prerelease") or not version_tuple(tag):
+            continue
+        if version_tuple(tag) < version_tuple(fix["fixed_in"]):
+            continue
+        wanted = fix["jar_pattern"] % tag
+        asset = next((a for a in release.get("assets", []) if a["name"] == wanted), None)
+        if asset and (best is None or version_tuple(tag) > version_tuple(best[0])):
+            best = (tag, asset["name"], asset["browser_download_url"])
+    return best
+
+
 def apply_mod_fixes(instance: Path, squad, dry_run=False):
     """Swap in fixed mod jars the pack hasn't caught up with yet.
 
@@ -430,14 +461,20 @@ def apply_mod_fixes(instance: Path, squad, dry_run=False):
         if newest >= wanted:
             continue                                  # pack shipped it; superseded
         have = ".".join(str(n) for n in newest) if newest != (0,) else "unknown"
-        log("fix:        %s %s -> %s" % (fix["mod"], have, fix["fixed_in"]))
+        latest = newest_fix_release(fix)
+        jar_name, jar_url, to_version = fix["jar"], fix["url"], fix["fixed_in"]
+        if latest and version_tuple(latest[0]) > version_tuple(fix["fixed_in"]):
+            to_version, jar_name, jar_url = latest
+        if newest >= version_tuple(to_version):
+            continue                                  # already at or past it
+        log("fix:        %s %s -> %s" % (fix["mod"], have, to_version))
         print("      %s" % fix["why"])
         if dry_run:
             continue
-        target = mods / fix["jar"]
+        target = mods / jar_name
         try:
-            size, _ = remote_size(fix["url"])
-            download(fix["url"], target, size or -1, attempts=2)
+            size, _ = remote_size(jar_url)
+            download(jar_url, target, size or -1, attempts=2)
             with zipfile.ZipFile(long_path(target)) as jar_zip:   # must be a real jar
                 if not jar_zip.namelist():
                     raise ValueError("empty jar")
@@ -453,7 +490,7 @@ def apply_mod_fixes(instance: Path, squad, dry_run=False):
         for jar in installed:
             if jar != target:
                 rmtree(jar)
-        log("fix:        installed %s" % fix["jar"])
+        log("fix:        installed %s" % jar_name)
 
     for extra in MOD_EXTRAS:
         if extra.get("packs") and not pack.startswith(extra["packs"]):

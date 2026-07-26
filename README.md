@@ -98,7 +98,7 @@ tracks the newest GTNH release.
 ## Pinned mod fixes (squad only)
 
 `MOD_FIXES` at the top of the script lists mod jars we swap in ahead of the
-pack — currently Angelica 2.1.51 ([#1916]/[PR #1917]: with clouds disabled the
+pack — currently the newest Angelica at or above 2.1.51 ([#1916]/[PR #1917]: with clouds disabled the
 personal dimension's farplane goes infinite, breaking subchunk culling so only
 the subchunk you occupy renders). A fix applies on every update and every
 launch check, is skipped in a heartbeat once installed (filename comparison, no
