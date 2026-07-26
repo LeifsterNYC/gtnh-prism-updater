@@ -171,7 +171,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -2188,25 +2188,70 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
-def single_instance_lock(tag, stale_after=4 * 3600):
+def pid_alive(pid):
+    """Is that process still running? Unsure counts as dead — a lock nobody
+    can clear is worse than the small chance of two runs overlapping."""
+    if pid <= 0:
+        return False
+    if IS_WIN:
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE = 0x1000, 259
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            code = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return bool(ok) and code.value == STILL_ACTIVE
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                            # someone else's process, so alive
+    except OSError:
+        return False
+
+
+def single_instance_lock(tag, stale_after=30 * 60):
     """Refuse to run twice at once.
 
     Prism can fire the pre-launch check again while one is still on screen,
     and two updaters writing the same instance is the last thing anyone needs.
-    Returns the lock path to release, or None if another run holds it.
+    A lock whose owner has died (closed console, killed launch) is taken over
+    immediately — waiting hours for a stale file helps nobody.
+    Returns the lock path to release, or None if a LIVE run holds it.
     """
     lock = Path(tempfile.gettempdir()) / ("gtnh-updater-%s.lock" % re.sub(r"\W+", "-", tag)[-60:])
-    try:
-        if lock.exists() and time.time() - lock.stat().st_mtime > stale_after:
-            lock.unlink()                      # left behind by a killed run
-        handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(handle, str(os.getpid()).encode())
-        os.close(handle)
-        return lock
-    except FileExistsError:
-        return None
-    except OSError:
-        return lock                            # locking is best-effort, never fatal
+    for attempt in (1, 2):
+        try:
+            handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(handle, str(os.getpid()).encode())
+            os.close(handle)
+            return lock
+        except FileExistsError:
+            if attempt == 2:
+                return None
+            try:
+                owner = int((lock.read_text(encoding="utf-8", errors="replace").strip() or "0"))
+            except (OSError, ValueError):
+                owner = 0
+            expired = time.time() - lock.stat().st_mtime > stale_after
+            if owner == os.getpid() or not pid_alive(owner) or expired:
+                try:
+                    lock.unlink()              # owner is gone; take it over
+                except OSError:
+                    return None
+                continue
+            single_instance_lock.owner = owner
+            return None
+        except OSError:
+            return lock                        # locking is best-effort, never fatal
 
 
 def release_lock(lock):
@@ -2251,7 +2296,10 @@ def main(argv=None):
 
     lock = single_instance_lock(args.instance or "auto")
     if lock is None:
-        warn("another copy of the updater is already running — leaving this one to it")
+        owner = getattr(single_instance_lock, "owner", 0)
+        warn("another copy of the updater is running (process %s) — leaving this one to it.\n"
+             "         If it is showing an update box, answer that one. Otherwise close it, "
+             "or wait a moment and try again." % (owner or "?"))
         return 0
     try:
         if args.check:
