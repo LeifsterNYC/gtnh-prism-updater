@@ -171,7 +171,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.7.2"
+__version__ = "1.7.3"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -447,7 +447,11 @@ def apply_mod_fixes(instance: Path, squad, dry_run=False):
     for fix in MOD_FIXES:
         if fix.get("packs") and not pack.startswith(fix["packs"]):
             # A fix jar built for 2.9 dropped into a 2.8 pack is a crash, not
-            # a favour — declined updates keep the pack they have.
+            # a favour — declined updates keep the pack they have. Say so:
+            # silently doing nothing is indistinguishable from being broken.
+            log("fix:        skipping %s — this instance reports pack %s, the fix is "
+                "for %s. Run --status if that pack version looks wrong."
+                % (fix["mod"], pack, fix["packs"]))
             continue
         installed = {}
         for jar in mods.iterdir():
@@ -479,11 +483,12 @@ def apply_mod_fixes(instance: Path, squad, dry_run=False):
                 if not jar_zip.namelist():
                     raise ValueError("empty jar")
         except SystemExit:
-            warn("could not download the %s fix — the pack's own version is still in "
-                 "place, so the game still runs" % fix["mod"])
+            warn("could not download the %s fix — the pack's own version (%s) is still "
+                 "in place. The game runs; the fix retries on the next launch." % (fix["mod"], have))
             return
         except Exception as e:
-            warn("could not install the %s fix (%s) — leaving the pack's version" % (fix["mod"], e))
+            warn("could not install the %s fix (%s) — leaving the pack's version (%s). "
+                 "It retries on the next launch." % (fix["mod"], e, have))
             if target.exists() and target not in installed:
                 target.unlink()
             continue
@@ -1919,9 +1924,20 @@ def run_status(args):
     print("  memory    : min %s / max %s MB" % (icfg.get("MinMemAlloc", "?"), icfg.get("MaxMemAlloc", "?")))
     print("  jvm args  : %s" % (icfg.get("JvmArgs") or "(none — correct for Java 17+)"))
     mods = (mc_dir(inst) or inst) / "mods"
+    pack = instance_version(inst)
     for fix in MOD_FIXES:
         jars = sorted(p.name for p in mods.glob("*.jar") if mod_key(p.name) == fix["mod"]) if mods.is_dir() else []
-        print("  fix %-6s: %s (want >= %s)" % (fix["mod"][:6], ", ".join(jars) or "not present", fix["fixed_in"]))
+        have = max((version_tuple(re.search(r"(\d+\.\d+(?:\.\d+)?)", j).group(1))
+                    for j in jars if re.search(r"(\d+\.\d+(?:\.\d+)?)", j)), default=(0,))
+        if not jars:
+            verdict = "mod not installed"
+        elif fix.get("packs") and not pack.startswith(fix["packs"]):
+            verdict = "SKIPPED — pack reads %s, fix is for %s" % (pack, fix["packs"])
+        elif have >= version_tuple(fix["fixed_in"]):
+            verdict = "OK"
+        else:
+            verdict = "NEEDED — still on the pack's version, fix has not applied"
+        print("  fix %-8s: %s  [%s]" % (fix["mod"][:8], ", ".join(jars) or "-", verdict))
     backup_dir = (Path(args.backup_dir).expanduser() if args.backup_dir
                   else inst.parent.parent / "GTNH-Backups")
     backups = find_backups(inst, backup_dir)
