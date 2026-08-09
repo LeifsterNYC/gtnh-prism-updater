@@ -51,6 +51,22 @@ SQUAD_SERVER = "10.242.74.230:25565"     # ZeroTier address of hermes
 # version, so this list does not need pruning to stay correct.
 MOD_FIXES = [
     {
+        # The pack ships 2.8.111 while upstream is many releases ahead, and
+        # NEI's AE2 integration (ctrl-click "request missing" in the crafting
+        # terminal) is among the things fixed since. NEI has a server-side
+        # half, so the server pack needs the same jar — see the server's
+        # mods folder, kept in step by hand.
+        "mod": "notenoughitems",
+        "packs": "2.9",
+        "fixed_in": "2.8.112",
+        "repo": "GTNewHorizons/NotEnoughItems",
+        "jar_pattern": "NotEnoughItems-%s.jar",
+        "jar": "NotEnoughItems-2.8.119-GTNH.jar",
+        "url": "https://github.com/GTNewHorizons/NotEnoughItems/releases/download/2.8.119-GTNH/NotEnoughItems-2.8.119-GTNH.jar",
+        "why": "NEI: pack ships 2.8.111, upstream is far ahead — fixes the AE2 crafting "
+               "terminal's ctrl-click 'request missing' among other things",
+    },
+    {
         "mod": "angelica",
         "packs": "2.9",              # only packs this jar is built against
         "fixed_in": "2.1.51",
@@ -171,7 +187,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.7.3"
+__version__ = "1.8.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
