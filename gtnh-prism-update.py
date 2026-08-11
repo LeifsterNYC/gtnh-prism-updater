@@ -50,59 +50,13 @@ SQUAD_SERVER = "10.242.74.230:25565"     # ZeroTier address of hermes
 # Each entry stops applying as soon as the pack carries an equal or newer
 # version, so this list does not need pruning to stay correct.
 MOD_FIXES = [
-    # --- NEI set: these three move together ------------------------------
-    # Newer NEI removed Recipe$RecipeId.getHandleName(). Every jar in the
-    # pack was scanned for callers of it; exactly two had them, and both are
-    # fixed in the versions pinned below. Update this trio together or not at
-    # all — shipping NEI alone is what broke recipe opening in v1.8.0.
-    {
-        "mod": "notenoughitems",
-        "packs": "2.9",
-        "fixed_in": "2.8.112",
-        "repo": "GTNewHorizons/NotEnoughItems",
-        "jar_pattern": "NotEnoughItems-%s.jar",
-        "jar": "NotEnoughItems-2.8.122-GTNH.jar",
-        "url": "https://github.com/GTNewHorizons/NotEnoughItems/releases/download/2.8.122-GTNH/NotEnoughItems-2.8.122-GTNH.jar",
-        "why": "NEI: pack ships 2.8.111 — newer builds restore the AE2 crafting terminal's "
-               "ctrl-click 'request missing'",
-    },
-    {
-        "mod": "neicustomdiagram",
-        "packs": "2.9",
-        "fixed_in": "1.8.34",
-        "repo": "GTNewHorizons/nei-custom-diagram",
-        "jar_pattern": "NEICustomDiagram-%s.jar",
-        "jar": "NEICustomDiagram-1.8.34.jar",
-        "url": "https://github.com/GTNewHorizons/nei-custom-diagram/releases/download/1.8.34/NEICustomDiagram-1.8.34.jar",
-        "why": "required with newer NEI: 1.8.30's ender-storage listener calls the removed "
-               "getHandleName() and throws the moment an ender tank syncs",
-    },
-    {
-        "mod": "guidenh",
-        "packs": "2.9",
-        "fixed_in": "1.3.20",
-        "repo": "GTNewHorizons/GuideNH",
-        "jar_pattern": "guidenh-%s.jar",
-        "jar": "guidenh-1.3.20.jar",
-        "url": "https://github.com/GTNewHorizons/GuideNH/releases/download/1.3.20/guidenh-1.3.20.jar",
-        "why": "required with newer NEI: 1.3.11's NEI guide navigation calls the removed "
-               "getHandleName()",
-    },
-    {
-        "mod": "angelica",
-        "packs": "2.9",              # only packs this jar is built against
-        "fixed_in": "2.1.51",
-        # Take the newest release from here rather than pinning the exact fix:
-        # pinning leaves people behind every later patch, and looks like a
-        # downgrade to anyone who had already updated the mod themselves.
-        "repo": "GTNewHorizons/Angelica",
-        "jar_pattern": "angelica-%s.jar",
-        "jar": "angelica-2.1.51.jar",
-        "url": "https://github.com/GTNewHorizons/Angelica/releases/download/2.1.51/angelica-2.1.51.jar",
-        "why": "Angelica #1916 / PR #1917: with clouds disabled the personal dimension's "
-               "farplane goes infinite, which breaks subchunk culling — only the subchunk "
-               "you occupy renders, and it follows you around. GTNH 2.9.0-beta-2 ships 2.1.50.",
-    },
+    # Empty by design. Hand-picking single jars into a pack repeatedly broke
+    # things: a removed method with two callers, then a hard dependency on a
+    # newer CodeChickenCore that took the server down. Daily builds ship whole
+    # coherent mod sets, so fixes belong there — gtnh-daily-updater pulls them.
+    # If something genuinely needs pinning ahead of the pack, verify BOTH that
+    # nothing calls a method it removed AND that its declared dependencies are
+    # satisfied before adding an entry here.
 ]
 
 REPO_API = "https://api.github.com/repos/GTNewHorizons/GT-New-Horizons-Modpack/releases"
@@ -209,7 +163,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.8.2"
+__version__ = "2.0.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -475,6 +429,85 @@ def newest_fix_release(fix):
     return best
 
 
+DAILY_TOOL_REPO = "Caedis/gtnh-daily-updater"
+
+
+def daily_tool_path(instance: Path):
+    """Where we keep gtnh-daily-updater — next to Prism, beside our own copy."""
+    home = instance.parent.parent if instance.parent.name == "instances" else instance.parent
+    return home / ("gtnh-daily-updater.exe" if IS_WIN else "gtnh-daily-updater")
+
+
+def install_daily_tool(instance: Path):
+    """Fetch the right gtnh-daily-updater build for this machine.
+
+    Dailies are not published as pack zips, so updating one means running the
+    tool GTNH's own devs maintain: it resolves whole mod sets from the pack
+    manifest, which is the only way the dependency graph stays coherent.
+    """
+    target = daily_tool_path(instance)
+    if target.is_file():
+        return target
+    system, machine = platform.system().lower(), platform.machine().lower()
+    goos = {"windows": "windows", "darwin": "darwin", "linux": "linux"}.get(system)
+    goarch = "arm64" if machine in ("arm64", "aarch64") else "amd64"
+    if not goos:
+        warn("no gtnh-daily-updater build for %s" % system)
+        return None
+    try:
+        latest = http_json("https://api.github.com/repos/%s/releases/latest" % DAILY_TOOL_REPO)
+    except Exception as e:
+        warn("could not reach the daily-updater releases (%s)" % e)
+        return None
+    want = "%s-%s" % (goos, goarch)
+    asset = next((a for a in latest.get("assets", [])
+                  if want in a["name"] and a["name"].endswith(".zip")), None)
+    if not asset:
+        warn("no daily-updater build published for %s" % want)
+        return None
+    log("fetching %s %s for %s" % (DAILY_TOOL_REPO, latest.get("tag_name"), want))
+    staging = Path(tempfile.mkdtemp(prefix="gtnh-daily-tool-"))
+    try:
+        archive = staging / asset["name"]
+        size, _ = remote_size(asset["browser_download_url"])
+        download(asset["browser_download_url"], archive, size or -1, attempts=2)
+        with zipfile.ZipFile(long_path(archive)) as zf:
+            member = next((n for n in zf.namelist() if n.rsplit("/", 1)[-1].startswith("gtnh-daily-updater")
+                           and not n.endswith("/")), None)
+            if not member:
+                raise ValueError("archive has no gtnh-daily-updater binary")
+            with zf.open(member) as src, open(long_path(target), "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        if not IS_WIN:
+            os.chmod(str(target), 0o755)
+        return target
+    except Exception as e:
+        warn("could not install gtnh-daily-updater (%s)" % e)
+        return None
+    finally:
+        rmtree(staging)
+
+
+def update_daily_instance(instance: Path, dry_run, assume_yes):
+    """Hand a daily instance to gtnh-daily-updater and report what it did."""
+    tool = install_daily_tool(instance)
+    if tool is None:
+        die("this instance is on a daily build, which only gtnh-daily-updater can update.\n"
+            "       Install it from https://github.com/%s/releases and run:\n"
+            "         gtnh-daily-updater update -d \"%s\" --side client" % (DAILY_TOOL_REPO, instance))
+    cmd = [str(tool), "update", "-d", str(instance)]
+    if dry_run:
+        cmd.append("--dry-run")
+    log("running: %s" % " ".join(cmd))
+    try:
+        result = subprocess.run(cmd, timeout=3600)
+    except (OSError, subprocess.SubprocessError) as e:
+        die("gtnh-daily-updater failed to run (%s)" % e)
+    if result.returncode != 0:
+        die("gtnh-daily-updater exited %d — nothing further was changed" % result.returncode)
+    return True
+
+
 def apply_mod_fixes(instance: Path, squad, dry_run=False):
     """Swap in fixed mod jars the pack hasn't caught up with yet.
 
@@ -680,7 +713,10 @@ def probe_server(address, timeout=8):
         # "Server is still starting! Please wait before reconnecting."
         return {"error": "server said: %s" % str(status)[:120]}
     motd = _flatten_description(status.get("description"))
-    m = re.search(r"\d+\.\d+(?:\.\d+)?(?:[-_](?:beta|rc|alpha|pre)[-_]?\d*)?", motd, re.I)
+    # Daily builds stamp a date, e.g. 2.9.0-nightly-2026-08-07 — match those
+    # before the shorter release forms so the date is not truncated away.
+    m = (re.search(r"\d+\.\d+(?:\.\d+)?[-_]nightly[-_]\d{4}-\d{2}-\d{2}", motd, re.I)
+         or re.search(r"\d+\.\d+(?:\.\d+)?(?:[-_](?:beta|rc|alpha|pre)[-_]?\d*)?", motd, re.I))
     return {"motd": motd.strip(),
             "version": m.group(0) if m else None,
             "players": status.get("players", {}),
@@ -1190,8 +1226,19 @@ def extra_mods(old_mods: Path, pack_names):
                   if p.is_file() and mod_key(p.name) not in pack_keys)
 
 
+def daily_state(instance: Path):
+    """gtnh-daily-updater's state file, if this instance is on a daily build."""
+    try:
+        return json.loads((instance / ".gtnh-daily-updater.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def instance_version(instance: Path):
     """Best-effort read of the GTNH version an instance is currently on."""
+    state = daily_state(instance)
+    if state and state.get("config_version"):
+        return state["config_version"]          # daily builds: authoritative
     stamp = instance / ".gtnh-version"
     if stamp.is_file():
         v = stamp.read_text(encoding="utf-8", errors="replace").strip().splitlines()
@@ -2504,6 +2551,27 @@ def run_update(args):
     if not args.dry_run and not confirm("Close Prism Launcher first. Proceed?", args.yes):
         log("aborted, nothing changed")
         return 1
+
+    # ---- daily builds are the daily tool's job ---------------------------
+    if old is not None and daily_state(old):
+        log("this instance is on a daily build (%s) — handing the pack update to "
+            "gtnh-daily-updater" % old_version)
+        if args.backup_mode != "none":
+            backup = make_backup(old, backup_dir, args.backup_mode, old_version,
+                                 args.dry_run, args.yes)
+            if backup is not None and not args.dry_run:
+                prune_backups(old, backup_dir, args.keep_backups)
+        if not args.dry_run and prism_running():
+            warn("Prism is open — close it first; it rewrites instance settings on exit.")
+        update_daily_instance(old, args.dry_run, args.yes)
+        run_update.target = old
+        if not args.dry_run:
+            new_version = instance_version(old)
+            log("done: %s is now on %s" % (old.name, new_version))
+            java_choice = ensure_java(old, "Java_17-25", False, args.yes)
+            apply_java(old, java_choice)
+            apply_config_tweaks(old, squad)
+        return 0
 
     # ---- 1. settle the Java question while nothing is at stake ----------
     pack_name = Path(url or pack or "").name
