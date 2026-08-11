@@ -51,20 +51,22 @@ SQUAD_SERVER = "10.242.74.230:25565"     # ZeroTier address of hermes
 # version, so this list does not need pruning to stay correct.
 MOD_FIXES = [
     {
-        # The pack ships 2.8.111 while upstream is many releases ahead, and
-        # NEI's AE2 integration (ctrl-click "request missing" in the crafting
-        # terminal) is among the things fixed since. NEI has a server-side
-        # half, so the server pack needs the same jar — see the server's
-        # mods folder, kept in step by hand.
+        # REVERT, not an upgrade. NEI 2.8.119 was pushed here to get the AE2
+        # crafting terminal's ctrl-click "request missing" back, and it broke
+        # the client: bogosorter 1.3.37 (what the pack ships) mixins into NEI
+        # and calls Recipe$RecipeId.getHandleName(), which 2.8.119 no longer
+        # has, so opening any recipe throws NoSuchMethodError. GTNH moves NEI
+        # and bogosorter together in nightlies; a stable pack cannot take one
+        # without the other. "exact" forces the pack's own jar back even
+        # though it is older than what is installed.
         "mod": "notenoughitems",
         "packs": "2.9",
-        "fixed_in": "2.8.112",
-        "repo": "GTNewHorizons/NotEnoughItems",
-        "jar_pattern": "NotEnoughItems-%s.jar",
-        "jar": "NotEnoughItems-2.8.119-GTNH.jar",
-        "url": "https://github.com/GTNewHorizons/NotEnoughItems/releases/download/2.8.119-GTNH/NotEnoughItems-2.8.119-GTNH.jar",
-        "why": "NEI: pack ships 2.8.111, upstream is far ahead — fixes the AE2 crafting "
-               "terminal's ctrl-click 'request missing' among other things",
+        "exact": True,
+        "fixed_in": "2.8.111",
+        "jar": "NotEnoughItems-2.8.111-GTNH.jar",
+        "url": "https://github.com/GTNewHorizons/NotEnoughItems/releases/download/2.8.111-GTNH/NotEnoughItems-2.8.111-GTNH.jar",
+        "why": "restoring the pack's own NEI — 2.8.119 breaks bogosorter's recipe mixin "
+               "(NoSuchMethodError on Recipe$RecipeId.getHandleName)",
     },
     {
         "mod": "angelica",
@@ -187,7 +189,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -434,11 +436,17 @@ def newest_fix_release(fix):
     except Exception:
         return None
     best = None
+    line = version_tuple(fix["fixed_in"])[:2]
     for release in releases:
         tag = (release.get("tag_name") or "").lstrip("vV")
         if release.get("draft") or release.get("prerelease") or not version_tuple(tag):
             continue
         if version_tuple(tag) < version_tuple(fix["fixed_in"]):
+            continue
+        if version_tuple(tag)[:2] != line:
+            # Patch releases within the line the pack is on only. A minor bump
+            # is where APIs move, and other pack mods mixin into these — that
+            # is exactly how NEI 2.8.119 broke bogosorter's recipe mixin.
             continue
         wanted = fix["jar_pattern"] % tag
         asset = next((a for a in release.get("assets", []) if a["name"] == wanted), None)
@@ -478,15 +486,21 @@ def apply_mod_fixes(instance: Path, squad, dry_run=False):
             continue
         newest = max(installed.values())
         wanted = version_tuple(fix["fixed_in"])
-        if newest >= wanted:
+        if fix.get("exact"):
+            # Pin to one specific jar, downgrading if necessary — used to walk
+            # back a fix that turned out to break something else.
+            if any(jar.name == fix["jar"] for jar in installed) and len(installed) == 1:
+                continue
+        elif newest >= wanted:
             continue                                  # pack shipped it; superseded
         have = ".".join(str(n) for n in newest) if newest != (0,) else "unknown"
-        latest = newest_fix_release(fix)
         jar_name, jar_url, to_version = fix["jar"], fix["url"], fix["fixed_in"]
-        if latest and version_tuple(latest[0]) > version_tuple(fix["fixed_in"]):
-            to_version, jar_name, jar_url = latest
-        if newest >= version_tuple(to_version):
-            continue                                  # already at or past it
+        if not fix.get("exact"):
+            latest = newest_fix_release(fix)
+            if latest and version_tuple(latest[0]) > version_tuple(fix["fixed_in"]):
+                to_version, jar_name, jar_url = latest
+            if newest >= version_tuple(to_version):
+                continue                              # already at or past it
         log("fix:        %s %s -> %s" % (fix["mod"], have, to_version))
         print("      %s" % fix["why"])
         if dry_run:
