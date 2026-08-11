@@ -163,7 +163,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -488,24 +488,57 @@ def install_daily_tool(instance: Path):
         rmtree(staging)
 
 
-def update_daily_instance(instance: Path, dry_run, assume_yes):
-    """Hand a daily instance to gtnh-daily-updater and report what it did."""
+def is_daily_version(version):
+    return bool(version) and "nightly" in str(version).lower()
+
+
+def run_daily_tool(tool, args_list, timeout=3600):
+    log("running: gtnh-daily-updater %s" % " ".join(args_list))
+    try:
+        result = subprocess.run([str(tool)] + args_list, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        warn("gtnh-daily-updater failed to run (%s)" % e)
+        return False
+    if result.returncode != 0:
+        warn("gtnh-daily-updater exited %d" % result.returncode)
+        return False
+    return True
+
+
+def update_daily_instance(instance: Path, current_version, dry_run, assume_yes, side="client"):
+    """Put an instance on the latest daily, initialising tracking if needed.
+
+    First time through this also runs `init`, which needs the version the
+    instance is on right now — that is what instance_version() is for, so a
+    player moving from a beta to dailies never has to look anything up.
+    """
     tool = install_daily_tool(instance)
     if tool is None:
-        die("this instance is on a daily build, which only gtnh-daily-updater can update.\n"
-            "       Install it from https://github.com/%s/releases and run:\n"
-            "         gtnh-daily-updater update -d \"%s\" --side client" % (DAILY_TOOL_REPO, instance))
-    cmd = [str(tool), "update", "-d", str(instance)]
+        warn("could not install gtnh-daily-updater — get it from "
+             "https://github.com/%s/releases and run:\n"
+             "         gtnh-daily-updater update -d \"%s\" --side %s"
+             % (DAILY_TOOL_REPO, instance, side))
+        return False
+
+    if not daily_state(instance):
+        if current_version in (None, "", "unknown"):
+            warn("cannot tell which pack version this instance is on, so daily tracking "
+                 "cannot be initialised automatically.\n"
+                 "         Run: gtnh-daily-updater init -d \"%s\" --side %s --config <version>"
+                 % (instance, side))
+            return False
+        log("first time on daily builds — initialising tracking at %s" % current_version)
+        if dry_run:
+            log("(dry run: would run init, then update)")
+            return True
+        if not run_daily_tool(tool, ["init", "-d", str(instance), "--side", side,
+                                     "--config", str(current_version)]):
+            return False
+
+    cmd = ["update", "-d", str(instance)]
     if dry_run:
         cmd.append("--dry-run")
-    log("running: %s" % " ".join(cmd))
-    try:
-        result = subprocess.run(cmd, timeout=3600)
-    except (OSError, subprocess.SubprocessError) as e:
-        die("gtnh-daily-updater failed to run (%s)" % e)
-    if result.returncode != 0:
-        die("gtnh-daily-updater exited %d — nothing further was changed" % result.returncode)
-    return True
+    return run_daily_tool(tool, cmd)
 
 
 def apply_mod_fixes(instance: Path, squad, dry_run=False):
@@ -717,10 +750,44 @@ def probe_server(address, timeout=8):
     # before the shorter release forms so the date is not truncated away.
     m = (re.search(r"\d+\.\d+(?:\.\d+)?[-_]nightly[-_]\d{4}-\d{2}-\d{2}", motd, re.I)
          or re.search(r"\d+\.\d+(?:\.\d+)?(?:[-_](?:beta|rc|alpha|pre)[-_]?\d*)?", motd, re.I))
+    mod_list = (status.get("modinfo") or {}).get("modList") or []
+    # A handful of mods that move with every pack build. The MOTD can go stale
+    # (it only republishes on restart); these come straight from the running
+    # server and are what FML actually compares when you connect.
+    markers = {m.get("modid"): m.get("version") for m in mod_list
+               if m.get("modid") in ("dreamcraft", "gregtech", "NotEnoughItems", "gtnhlib")}
     return {"motd": motd.strip(),
             "version": m.group(0) if m else None,
             "players": status.get("players", {}),
-            "mods": len((status.get("modinfo") or {}).get("modList") or [])}
+            "markers": markers,
+            "mods": len(mod_list)}
+
+
+def client_marker_versions(instance: Path):
+    """The same marker mods, read from the instance's jar names."""
+    mc = mc_dir(instance)
+    mods = mc / "mods" if mc else None
+    wanted = {"dreamcraft": "dreamcraft", "gregtech": "gregtech",
+              "notenoughitems": "NotEnoughItems", "gtnhlib": "gtnhlib"}
+    found = {}
+    if mods and mods.is_dir():
+        for jar in mods.iterdir():
+            key = mod_key(jar.name)
+            if jar.is_file() and key in wanted:
+                m = re.search(r"[-_](\d[\w.\-]*?)(?:-dev)?\.jar$", jar.name, re.I)
+                if m:
+                    found[wanted[key]] = m.group(1)
+    return found
+
+
+def markers_disagree(server_markers, client_markers):
+    """Marker mods present on both sides but at different versions."""
+    out = []
+    for modid, server_ver in (server_markers or {}).items():
+        mine = (client_markers or {}).get(modid)
+        if mine and server_ver and mine.rstrip("-GTNH") != str(server_ver).rstrip("-GTNH"):
+            out.append("%s %s vs server %s" % (modid, mine, server_ver))
+    return out
 
 
 def same_version(a, b):
@@ -2178,10 +2245,58 @@ def run_check(args):
         return 0
 
     server_ver = status["version"]
-    if same_version(local, server_ver):
+    drift = markers_disagree(status.get("markers"), client_marker_versions(inst))
+    if same_version(local, server_ver) and not drift:
         log("server %s is on %s — your instance matches. Have fun!" % (args.server, server_ver))
         squad_touchups(inst, squad)
         return 0
+    if same_version(local, server_ver) and drift:
+        # Version strings agree but the actual mods do not — the MOTD is stale,
+        # or someone changed jars by hand. Trust the mods; they decide the join.
+        warn("version says %s on both sides, but the mods differ: %s" % (server_ver, "; ".join(drift[:3])))
+
+    # ---- the server runs daily builds -----------------------------------
+    if is_daily_version(server_ver):
+        message = ("The server is on GTNH daily build %s.\n"
+                   "Your instance '%s' is on %s.\n\n"
+                   "Bring this instance to the server's build now?\n"
+                   "Your saves and settings are backed up first."
+                   % (server_ver, inst.name, local))
+        if not ask_yes_no("GTNH update needed", message, args.yes):
+            warn("not updating — single-player still works, joining the server will not")
+            squad_touchups(inst, squad)
+            return 0
+        if prism_running():
+            warn("Prism is open; it may rewrite instance settings when it closes.")
+        backup_dir = (Path(args.backup_dir).expanduser() if args.backup_dir
+                      else inst.parent.parent / "GTNH-Backups")
+        if args.backup_mode != "none":
+            made = make_backup(inst, backup_dir, args.backup_mode, local, args.dry_run, True)
+            if made is not None and not args.dry_run:
+                prune_backups(inst, backup_dir, args.keep_backups)
+        if not update_daily_instance(inst, local, args.dry_run, True):
+            warn("could not update — launching on the version you have")
+            return 0
+        if args.dry_run:
+            log("dry run — the launch is not being cancelled.")
+            return 0
+        landed = instance_version(inst)
+        squad_touchups(inst, squad)
+        apply_java(inst, ensure_java(inst, "Java_17-25", False, True))
+        if same_version(landed, server_ver):
+            show_message("GTNH updated",
+                         "Updated to %s, matching the server.\n\nPress Play again." % landed)
+        else:
+            # The daily tool always installs the newest build; if the server is
+            # held on an older one, say so rather than pretend this worked.
+            show_message("GTNH updated — but not to the server's build",
+                         "This instance is now on %s.\nThe server is on %s.\n\n"
+                         "Joining will still fail until the server is moved to %s."
+                         % (landed, server_ver, landed))
+            warn("landed on %s but the server is on %s — tell whoever runs the server"
+                 % (landed, server_ver))
+        return 1
+
     if pack_version_key(local) > pack_version_key(server_ver):
         log("your instance (%s) is AHEAD of the server (%s) — the server needs updating, "
             "not you. Launching." % (local, server_ver))
@@ -2553,9 +2668,11 @@ def run_update(args):
         return 1
 
     # ---- daily builds are the daily tool's job ---------------------------
-    if old is not None and daily_state(old):
-        log("this instance is on a daily build (%s) — handing the pack update to "
-            "gtnh-daily-updater" % old_version)
+    # Either the instance is already on dailies, or the server has moved to
+    # them and this instance has to follow.
+    if old is not None and (daily_state(old) or is_daily_version(version)):
+        log("target is a daily build (%s) — handing the pack update to "
+            "gtnh-daily-updater" % (old_version if daily_state(old) else version))
         if args.backup_mode != "none":
             backup = make_backup(old, backup_dir, args.backup_mode, old_version,
                                  args.dry_run, args.yes)
@@ -2563,7 +2680,8 @@ def run_update(args):
                 prune_backups(old, backup_dir, args.keep_backups)
         if not args.dry_run and prism_running():
             warn("Prism is open — close it first; it rewrites instance settings on exit.")
-        update_daily_instance(old, args.dry_run, args.yes)
+        if not update_daily_instance(old, old_version, args.dry_run, args.yes):
+            return 1
         run_update.target = old
         if not args.dry_run:
             new_version = instance_version(old)

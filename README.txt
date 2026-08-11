@@ -33,6 +33,8 @@ someone else who found this tool: answer No and it shows you how to point it
 at your own server; --reconfigure asks again.)
 
 It will:
+  * put you on exactly the pack build our server runs (we play daily builds
+    now, so this is handled by GTNH's own daily updater, fetched for you)
   * check that your Java works with the version it installs, and switch the
     instance to a Java that does if it finds one
   * apply our pinned mod fixes and extras: the Angelica 2.1.51 fix (personal
