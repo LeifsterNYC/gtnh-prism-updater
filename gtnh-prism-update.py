@@ -163,7 +163,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -208,6 +208,23 @@ def warn(msg):
 def die(msg):
     print("%s %s" % (_color("1;31", "[gtnh] error:"), msg), file=sys.stderr, flush=True)
     sys.exit(1)
+
+
+def progress(message, done=False):
+    """Show progress in a way Prism's log window can actually render.
+
+    Prism captures the pre-launch command's output line by line, so a status
+    line rewritten with \\r never appears — 400 MB of backup looks like a
+    freeze. On a terminal keep the tidy single line; otherwise print a fresh
+    line every few seconds so there is visible movement.
+    """
+    if sys.stdout.isatty():
+        print("\r" + message, end="\n" if done else "", flush=True)
+        return
+    now = time.monotonic()
+    if done or now - getattr(progress, "last", 0) >= 5:
+        progress.last = now
+        print(message, flush=True)
 
 
 def human(n):
@@ -528,6 +545,8 @@ def update_daily_instance(instance: Path, current_version, dry_run, assume_yes, 
                  % (instance, side))
             return False
         log("first time on daily builds — initialising tracking at %s" % current_version)
+        log("            this takes a few minutes and prints nothing while it works "
+            "(it is indexing every config file). Do not close this window.")
         if dry_run:
             log("(dry run: would run init, then update)")
             return True
@@ -1144,10 +1163,9 @@ def download(url, dest: Path, expected_size, attempts=4):
                         if time.monotonic() - last > 2:
                             last = time.monotonic()
                             pct = ("%5.1f%% " % (100.0 * have / expected_size)) if expected_size > 0 else ""
-                            print("\r    downloading %s%s of %s" %
-                                  (pct, human(have), human(expected_size) if expected_size > 0 else "?"),
-                                  end="", flush=True)
-            print("\r    downloaded %s%s" % (human(have), " " * 30), flush=True)
+                            progress("    downloading %s%s of %s" %
+                                     (pct, human(have), human(expected_size) if expected_size > 0 else "?"))
+            progress("    downloaded %s%s" % (human(have), " " * 30), done=True)
             break
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
             print("", flush=True)
@@ -1213,8 +1231,7 @@ def extract_pack(zip_path: Path, target: Path):
         for i, m in enumerate(members, 1):
             zf.extract(m, long_path(staging))
             if i % 500 == 0 or i == total:
-                print("\r    extracting %d/%d files" % (i, total), end="", flush=True)
-        print("", flush=True)
+                progress("    extracting %d/%d files" % (i, total), done=(i == total))
         src = staging / root
         target.parent.mkdir(parents=True, exist_ok=True)
         rmtree(target)
@@ -1456,8 +1473,8 @@ def make_backup(instance: Path, backup_dir: Path, mode, version, dry_run, assume
                     except OSError as e:
                         warn("skipped %s (%s)" % (src, e))
                     if time.monotonic() - t0 > 1 and total:
-                        print("\r    archiving %5.1f%%  (%s)" %
-                              (100.0 * done[0] / total, human(done[0])), end="", flush=True)
+                        progress("    archiving %5.1f%%  (%s of %s)" %
+                                 (100.0 * done[0] / total, human(done[0]), human(total)))
         else:
             zf.write(long_path(path), arc)
             done[0] += path.stat().st_size
@@ -1471,7 +1488,7 @@ def make_backup(instance: Path, backup_dir: Path, mode, version, dry_run, assume
     except KeyboardInterrupt:
         rmtree(dest)
         die("backup interrupted — no changes were made")
-    print("\r    archived %s%s" % (human(done[0]), " " * 30), flush=True)
+    progress("    archived %s%s" % (human(done[0]), " " * 30), done=True)
     log("backup written: %s (%s on disk)" % (dest, human(dest.stat().st_size)))
     return dest
 
