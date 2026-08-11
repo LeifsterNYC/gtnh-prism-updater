@@ -50,23 +50,43 @@ SQUAD_SERVER = "10.242.74.230:25565"     # ZeroTier address of hermes
 # Each entry stops applying as soon as the pack carries an equal or newer
 # version, so this list does not need pruning to stay correct.
 MOD_FIXES = [
+    # --- NEI set: these three move together ------------------------------
+    # Newer NEI removed Recipe$RecipeId.getHandleName(). Every jar in the
+    # pack was scanned for callers of it; exactly two had them, and both are
+    # fixed in the versions pinned below. Update this trio together or not at
+    # all — shipping NEI alone is what broke recipe opening in v1.8.0.
     {
-        # REVERT, not an upgrade. NEI 2.8.119 was pushed here to get the AE2
-        # crafting terminal's ctrl-click "request missing" back, and it broke
-        # the client: bogosorter 1.3.37 (what the pack ships) mixins into NEI
-        # and calls Recipe$RecipeId.getHandleName(), which 2.8.119 no longer
-        # has, so opening any recipe throws NoSuchMethodError. GTNH moves NEI
-        # and bogosorter together in nightlies; a stable pack cannot take one
-        # without the other. "exact" forces the pack's own jar back even
-        # though it is older than what is installed.
         "mod": "notenoughitems",
         "packs": "2.9",
-        "exact": True,
-        "fixed_in": "2.8.111",
-        "jar": "NotEnoughItems-2.8.111-GTNH.jar",
-        "url": "https://github.com/GTNewHorizons/NotEnoughItems/releases/download/2.8.111-GTNH/NotEnoughItems-2.8.111-GTNH.jar",
-        "why": "restoring the pack's own NEI — 2.8.119 breaks bogosorter's recipe mixin "
-               "(NoSuchMethodError on Recipe$RecipeId.getHandleName)",
+        "fixed_in": "2.8.112",
+        "repo": "GTNewHorizons/NotEnoughItems",
+        "jar_pattern": "NotEnoughItems-%s.jar",
+        "jar": "NotEnoughItems-2.8.122-GTNH.jar",
+        "url": "https://github.com/GTNewHorizons/NotEnoughItems/releases/download/2.8.122-GTNH/NotEnoughItems-2.8.122-GTNH.jar",
+        "why": "NEI: pack ships 2.8.111 — newer builds restore the AE2 crafting terminal's "
+               "ctrl-click 'request missing'",
+    },
+    {
+        "mod": "neicustomdiagram",
+        "packs": "2.9",
+        "fixed_in": "1.8.34",
+        "repo": "GTNewHorizons/nei-custom-diagram",
+        "jar_pattern": "NEICustomDiagram-%s.jar",
+        "jar": "NEICustomDiagram-1.8.34.jar",
+        "url": "https://github.com/GTNewHorizons/nei-custom-diagram/releases/download/1.8.34/NEICustomDiagram-1.8.34.jar",
+        "why": "required with newer NEI: 1.8.30's ender-storage listener calls the removed "
+               "getHandleName() and throws the moment an ender tank syncs",
+    },
+    {
+        "mod": "guidenh",
+        "packs": "2.9",
+        "fixed_in": "1.3.20",
+        "repo": "GTNewHorizons/GuideNH",
+        "jar_pattern": "guidenh-%s.jar",
+        "jar": "guidenh-1.3.20.jar",
+        "url": "https://github.com/GTNewHorizons/GuideNH/releases/download/1.3.20/guidenh-1.3.20.jar",
+        "why": "required with newer NEI: 1.3.11's NEI guide navigation calls the removed "
+               "getHandleName()",
     },
     {
         "mod": "angelica",
@@ -189,7 +209,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
