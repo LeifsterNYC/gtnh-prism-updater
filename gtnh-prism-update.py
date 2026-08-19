@@ -163,7 +163,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -920,16 +920,21 @@ def version_tuple(text):
 def pack_version_key(text):
     """Orderable key for GTNH pack versions.
 
-    Understands that 2.9.0-beta-2 > 2.9.0-beta-1 and that a final 2.9.0
-    outranks its own betas and RCs — version_tuple() alone sees all of those
-    as (2, 9, 0).
+    Understands that 2.9.0-beta-2 > 2.9.0-beta-1, that a final 2.9.0 outranks
+    its own betas, and — the part that matters for dailies — that
+    nightly-2026-08-19 is NEWER than nightly-2026-08-07. Without the date the
+    two compare equal, which is how a client ahead of the server got offered
+    an "update" that was really a downgrade.
     """
     text = text or ""
-    base = re.split(r"[-_](?:alpha|beta|pre|rc)", text, flags=re.I)[0]
+    base = re.split(r"[-_](?:alpha|beta|pre|rc|nightly)", text, flags=re.I)[0]
     nums = tuple(int(n) for n in re.findall(r"\d+", base)[:3])
+    nightly = re.search(r"nightly[-_](\d{4})-(\d{2})-(\d{2})", text, re.I)
+    if nightly:
+        return nums, 4, tuple(int(g) for g in nightly.groups())
     m = re.search(r"[-_](alpha|beta|pre|rc)[-_]?(\d+)?", text, re.I)
     phase = {"alpha": 0, "beta": 1, "pre": 2, "rc": 2}[m.group(1).lower()] if m else 3
-    return nums, phase, int(m.group(2)) if m and m.group(2) else 0
+    return nums, phase, (int(m.group(2)) if m and m.group(2) else 0,)
 
 
 def self_update(argv):
@@ -2241,6 +2246,10 @@ def manage_hook(args):
     return 0
 
 
+def instance_hint(instance):
+    return str(instance)
+
+
 def run_check(args):
     """Pre-launch check. Exit 0 lets Prism launch, non-zero cancels it."""
     inst = pick_instance(args.instance, True, allow_none=True)
@@ -2272,11 +2281,32 @@ def run_check(args):
         # or someone changed jars by hand. Trust the mods; they decide the join.
         warn("version says %s on both sides, but the mods differ: %s" % (server_ver, "; ".join(drift[:3])))
 
+    # ---- ahead of the server --------------------------------------------
+    # Never offer to "update" someone onto an older build. gtnh-daily-updater
+    # can only move forward to the newest daily, so running it here changes
+    # nothing and the prompt returns on every launch — which is exactly what
+    # happened to a player sitting on a newer daily than the server.
+    if pack_version_key(local) > pack_version_key(server_ver):
+        log("your instance (%s) is AHEAD of the server (%s)." % (local, server_ver))
+        print("      Nothing here can fix that: the daily updater only moves forward, so it")
+        print("      cannot take you back to the server's build. Either the server gets")
+        print("      moved up to %s, or restore a backup from before you updated:" % local)
+        print("        gtnh-prism-update.py --restore --instance \"%s\"" % instance_hint(inst))
+        show_message(
+            "Your GTNH is newer than the server",
+            "This instance is on %s.\nThe server is on %s.\n\n"
+            "You are AHEAD, so there is nothing to update — joining will fail until the "
+            "server is moved up to your build.\n\nTell whoever runs the server. "
+            "Single-player works fine meanwhile." % (local, server_ver),
+            timeout=45)
+        squad_touchups(inst, squad)
+        return 0
+
     # ---- the server runs daily builds -----------------------------------
     if is_daily_version(server_ver):
         message = ("The server is on GTNH daily build %s.\n"
-                   "Your instance '%s' is on %s.\n\n"
-                   "Bring this instance to the server's build now?\n"
+                   "Your instance '%s' is on %s — behind the server.\n\n"
+                   "Update it to match the server so you can join?\n"
                    "Your saves and settings are backed up first."
                    % (server_ver, inst.name, local))
         if not ask_yes_no("GTNH update needed", message, args.yes):
@@ -2314,16 +2344,10 @@ def run_check(args):
                  % (landed, server_ver))
         return 1
 
-    if pack_version_key(local) > pack_version_key(server_ver):
-        log("your instance (%s) is AHEAD of the server (%s) — the server needs updating, "
-            "not you. Launching." % (local, server_ver))
-        squad_touchups(inst, squad)
-        return 0
-
     message = ("The server is running GTNH %s.\n"
-               "Your instance '%s' is on %s.\n\n"
-               "You need to update before you can join.\n\n"
-               "Update now? Your saves and settings are backed up first."
+               "Your instance '%s' is on %s — older than the server.\n\n"
+               "Update it to the server's version so you can join?\n\n"
+               "Your saves and settings are backed up first."
                % (server_ver, inst.name, local))
     if not ask_yes_no("GTNH update needed", message, args.yes):
         warn("not updating — you can play single-player, but joining the server will fail")
