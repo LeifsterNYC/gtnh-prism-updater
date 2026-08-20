@@ -163,7 +163,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "2.1.2"
+__version__ = "2.2.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -503,6 +503,23 @@ def install_daily_tool(instance: Path):
         return None
     finally:
         rmtree(staging)
+
+
+DAILY_MANIFEST_URL = ("https://raw.githubusercontent.com/GTNewHorizons/DreamAssemblerXXL"
+                      "/master/releases/manifests/daily.json")
+
+
+def latest_daily_version():
+    """Config version of the newest daily — what `update` would install.
+
+    gtnh-daily-updater has no way to target a specific build, so if this does
+    not equal what the server runs, updating now overshoots the server and
+    leaves the player unable to join with no way back.
+    """
+    try:
+        return (http_json(DAILY_MANIFEST_URL) or {}).get("config")
+    except Exception:
+        return None
 
 
 def is_daily_version(version):
@@ -2309,6 +2326,23 @@ def run_check(args):
                    "Update it to match the server so you can join?\n"
                    "Your saves and settings are backed up first."
                    % (server_ver, inst.name, local))
+        newest = latest_daily_version()
+        if newest and not same_version(newest, server_ver):
+            # Updating would land on `newest`, not the server's build, and
+            # nothing can walk it back afterwards. Refuse rather than strand
+            # the player ahead of the server.
+            log("the newest daily is %s but the server is held on %s — not updating, "
+                "because that would put you AHEAD of the server with no way back."
+                % (newest, server_ver))
+            show_message(
+                "Cannot match the server right now",
+                "The server is on %s.\nThe newest daily build is %s.\n\n"
+                "Updating can only install the newest build, which would put you ahead "
+                "of the server and unable to join.\n\n"
+                "Ask whoever runs the server to move it up to %s."
+                % (server_ver, newest, newest), timeout=45)
+            squad_touchups(inst, squad)
+            return 0
         if not ask_yes_no("GTNH update needed", message, args.yes):
             warn("not updating — single-player still works, joining the server will not")
             squad_touchups(inst, squad)
