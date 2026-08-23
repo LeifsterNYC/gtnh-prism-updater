@@ -163,7 +163,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -520,6 +520,32 @@ def latest_daily_version():
         return (http_json(DAILY_MANIFEST_URL) or {}).get("config")
     except Exception:
         return None
+
+
+# Manifest names for the mods we fingerprint a build with.
+MANIFEST_MARKERS = {"NotEnoughItems": "NotEnoughItems", "GTNHLib": "gtnhlib",
+                    "NewHorizonsCoreMod": "dreamcraft", "GT5-Unofficial": "gregtech"}
+
+
+def manifest_marker_versions():
+    """Marker versions the newest daily would install, or None if unreachable.
+
+    Compared against what the server actually advertises, this answers the
+    only question that matters before updating: would `update` land on the
+    server's build, or past it? The MOTD cannot answer that — it is a string
+    someone has to remember to change.
+    """
+    try:
+        manifest = http_json(DAILY_MANIFEST_URL) or {}
+    except Exception:
+        return None, None
+    mods = manifest.get("github_mods") or {}
+    out = {}
+    for manifest_name, marker in MANIFEST_MARKERS.items():
+        entry = mods.get(manifest_name) or {}
+        if entry.get("version"):
+            out[marker] = entry["version"]
+    return out, manifest.get("config")
 
 
 def is_daily_version(version):
@@ -2288,14 +2314,20 @@ def run_check(args):
         return 0
 
     server_ver = status["version"]
-    drift = markers_disagree(status.get("markers"), client_marker_versions(inst))
-    if same_version(local, server_ver) and not drift:
-        log("server %s is on %s — your instance matches. Have fun!" % (args.server, server_ver))
+    server_markers = status.get("markers") or {}
+    my_markers = client_marker_versions(inst)
+    drift = markers_disagree(server_markers, my_markers)
+    # The mods decide whether you can join. A server only republishes its MOTD
+    # when it restarts, so that string goes stale — trust it for display only.
+    if server_markers and my_markers and not drift:
+        if not same_version(local, server_ver):
+            log("the server reports %s but its mods match yours (%s) — its MOTD is just "
+                "out of date. Nothing to do." % (server_ver, local))
+        else:
+            log("server %s is on %s — your instance matches. Have fun!" % (args.server, server_ver))
         squad_touchups(inst, squad)
         return 0
     if same_version(local, server_ver) and drift:
-        # Version strings agree but the actual mods do not — the MOTD is stale,
-        # or someone changed jars by hand. Trust the mods; they decide the join.
         warn("version says %s on both sides, but the mods differ: %s" % (server_ver, "; ".join(drift[:3])))
 
     # ---- ahead of the server --------------------------------------------
@@ -2326,8 +2358,13 @@ def run_check(args):
                    "Update it to match the server so you can join?\n"
                    "Your saves and settings are backed up first."
                    % (server_ver, inst.name, local))
-        newest = latest_daily_version()
-        if newest and not same_version(newest, server_ver):
+        newest_markers, newest = manifest_marker_versions()
+        # Would the newest daily land on the server's build? Ask the mods, not
+        # the MOTD: a same-day rebuild (…-08-23 vs …-08-23-3) or an unstamped
+        # MOTD both make the strings disagree while the mods are identical.
+        overshoot = bool(newest_markers and server_markers
+                         and markers_disagree(newest_markers, server_markers))
+        if overshoot:
             # Updating would land on `newest`, not the server's build, and
             # nothing can walk it back afterwards. Refuse rather than strand
             # the player ahead of the server.
