@@ -163,7 +163,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -1518,17 +1518,24 @@ def make_backup(instance: Path, backup_dir: Path, mode, version, dry_run, assume
                     try:
                         zf.write(long_path(src), "%s/%s" % (name, f))
                         done[0] += src.stat().st_size
-                    except OSError as e:
+                    except (OSError, ValueError) as e:
                         warn("skipped %s (%s)" % (src, e))
                     if time.monotonic() - t0 > 1 and total:
                         progress("    archiving %5.1f%%  (%s of %s)" %
                                  (100.0 * done[0] / total, human(done[0]), human(total)))
         else:
-            zf.write(long_path(path), arc)
-            done[0] += path.stat().st_size
+            try:
+                zf.write(long_path(path), arc)
+                done[0] += path.stat().st_size
+            except (OSError, ValueError) as e:
+                warn("skipped %s (%s)" % (path, e))
 
     try:
         kwargs = {"compresslevel": 1} if sys.version_info >= (3, 7) else {}
+        # Py3.8+: clamp pre-1980 file mtimes (mtime 0) instead of raising
+        # "ZIP does not support timestamps before 1980" and killing the backup.
+        if sys.version_info >= (3, 8):
+            kwargs["strict_timestamps"] = False
         with zipfile.ZipFile(long_path(dest), "w", zipfile.ZIP_DEFLATED,
                              allowZip64=True, **kwargs) as zf:
             for p, arc in items:
