@@ -163,7 +163,7 @@ CFG_CARRY = [
 ]
 
 IS_WIN = os.name == "nt"
-__version__ = "2.3.1"
+__version__ = "2.4.0"
 SELF_RELEASE_API = "https://api.github.com/repos/LeifsterNYC/gtnh-prism-updater/releases/latest"
 
 
@@ -597,10 +597,113 @@ def update_daily_instance(instance: Path, current_version, dry_run, assume_yes, 
                                      "--config", str(current_version)]):
             return False
 
-    cmd = ["update", "-d", str(instance)]
+    # --log-file captures the tool's debug output — including the git errors it
+    # otherwise swallows — without flooding Prism's window the way -v would.
+    # Prism does not keep pre-launch output, so this is the only record.
+    cmd = ["update", "-d", str(instance), "--log-file", str(instance / DAILY_TOOL_LOG)]
     if dry_run:
         cmd.append("--dry-run")
-    return run_daily_tool(tool, cmd)
+    if not run_daily_tool(tool, cmd):
+        return False
+    if not dry_run:
+        repair_config_merge(instance)
+    return True
+
+
+DAILY_TOOL_LOG = "gtnh-daily-updater.log"
+# Paths gtnh-daily-updater copies from its config repo into a client instance
+# (allTrackedItems in internal/gitconfigs). Anything else in the repo is pack
+# scaffolding and must not land in the game directory.
+DAILY_TRACKED = ("config/", "journeymap/", "resourcepacks/", "serverutilities/", "servers.json")
+
+
+def _git(repo, *args):
+    """Run git in repo; returns (ok, combined output)."""
+    try:
+        r = subprocess.run(["git", "-c", "core.quotepath=off"] + list(args), cwd=str(repo),
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           universal_newlines=True, encoding="utf-8", errors="replace")
+    except OSError as e:
+        return False, str(e)
+    return r.returncode == 0, r.stdout
+
+
+def repair_config_merge(instance: Path):
+    """Redo a config update gtnh-daily-updater recorded without performing.
+
+    Up to at least 1.2.2, if `git merge` fails before it starts (no conflicted
+    files), the tool's conflict resolver finds nothing to do, then
+    `commit --allow-empty` records an EMPTY single-parent "Update configs to X".
+    The state file says X, the mods are X, but no X config ever reached the
+    game — e.g. a missing microblocks.cfg line got players kicked with
+    "microblocks are not installed on this client". A real update is always a
+    merge commit, so a single-parent one is the tell.
+
+    Repairs it the way the tool would have: merge X with pack-wins on
+    conflicts, then copy only the files that merge changed into the game,
+    backing up whatever they replace. Safe to call on every launch.
+    """
+    state = daily_state(instance)
+    mc = mc_dir(instance)
+    version = (state or {}).get("config_version")
+    repo = mc / ".gtnh-configs" if mc else None
+    if not version or not repo or not (repo / ".git").exists() or not shutil.which("git"):
+        return
+    ok, subject = _git(repo, "log", "-1", "--format=%s")
+    ok2, parents = _git(repo, "rev-list", "--parents", "-n", "1", "HEAD")
+    if not (ok and ok2) or subject.strip() != "Update configs to %s" % version \
+            or len(parents.split()) != 2:
+        return
+    commitish = version + "^{commit}"
+    if not _git(repo, "rev-parse", "-q", "--verify", commitish)[0]:
+        _git(repo, "fetch", "--force", "--no-tags", "origin", "tag", version)
+    if _git(repo, "merge-base", "--is-ancestor", commitish, "HEAD")[0]:
+        return                       # pack version is merged after all
+    warn("the daily updater recorded configs %s without applying them — fixing that now"
+         % version)
+
+    ok, out = _git(repo, "merge", "--no-commit", "--no-ff", "-X", "theirs", version)
+    if not (repo / ".git" / "MERGE_HEAD").exists():
+        warn("could not merge configs %s:\n%s" % (version, out.strip()))
+        return
+    # -X theirs leaves structural conflicts behind; same pack-wins rule as the tool.
+    _, status = _git(repo, "status", "--porcelain=v1", "-z")
+    for entry in filter(None, status.split("\0")):
+        code, path = entry[:2], entry[3:]
+        if code in ("UD", "AU", "DD"):
+            _git(repo, "rm", "-q", "--cached" if code == "DD" else "--", path)
+        elif "U" in code or code == "AA":
+            _git(repo, "checkout", "--theirs", "--", path)
+            _git(repo, "add", "--", path)
+    ok, out = _git(repo, "commit", "--no-edit", "-m",
+                   "Update configs to %s (re-merged by gtnh-updater)" % version)
+    if not ok:
+        _git(repo, "merge", "--abort")
+        warn("could not commit the config merge:\n%s" % out.strip())
+        return
+
+    _, changed = _git(repo, "diff", "--no-renames", "--name-status", "HEAD~1", "HEAD")
+    backup = instance / (".gtnh-remerge-backup-" + time.strftime("%Y-%m-%d-%H%M%S"))
+    counts = {"copied": 0, "removed": 0}
+    for line in changed.splitlines():
+        status_code, _, path = line.partition("\t")
+        if not path.startswith(DAILY_TRACKED):
+            continue
+        dst = mc / path
+        if dst.is_file():
+            keep = backup / path
+            keep.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dst, keep)
+        if status_code == "D":
+            if dst.is_file():
+                dst.unlink()
+            counts["removed"] += 1
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(repo / path, dst)
+            counts["copied"] += 1
+    log("configs %s applied: %d file(s) updated, %d removed; replaced files saved in %s"
+        % (version, counts["copied"], counts["removed"], backup.name))
 
 
 def apply_mod_fixes(instance: Path, squad, dry_run=False):
@@ -702,6 +805,8 @@ def apply_mod_fixes(instance: Path, squad, dry_run=False):
 
 def squad_touchups(instance: Path, squad):
     """Everything the launch check maintains besides the version itself."""
+    if instance is not None:
+        repair_config_merge(instance)
     apply_mod_fixes(instance, squad)
     apply_config_tweaks(instance, squad, remember=True)
 
